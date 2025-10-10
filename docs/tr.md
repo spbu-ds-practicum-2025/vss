@@ -71,33 +71,36 @@
 ---
 
 ## Архитектура системы
-flowchart LR
-  flowchart LR
-    A[Planner] --> B[Worker Node 1]
-    A --> C[Worker Node 2]
-    A --> D[Worker Node 3]
-    
-    B --> E[Database]
+```mermaid
+flowchart TB
+ subgraph Masters["Управляющие узлы"]
+        A["Planner"]
+        F["Task Manager"]
+  end
+ subgraph Workers["Рабочие узлы"]
+        B["Worker Node 1"]
+        C["Worker Node 2"]
+        D["Worker Node 3"]
+  end
+ subgraph Infrastructure["Инфраструктура"]
+        E["Database"]
+  end
+    A --> B & C & D
+    B --> E
     C --> E
     D --> E
-    
-    B <--> C
-    B <--> D
-    C <--> D
-    
-    E --> F[Task Manager]
-    F --> A
-
- 
+    F --> E & A
+     A:::planner
+     F:::manager
+     B:::worker
+     C:::worker
+     D:::worker
+     E:::database
     classDef planner fill:#e1f5fe,stroke:#01579b,stroke-width:2px
     classDef worker fill:#f3e5f5,stroke:#4a148c,stroke-width:1px
     classDef database fill:#e8f5e8,stroke:#1b5e20,stroke-width:1px
     classDef manager fill:#fff3e0,stroke:#e65100,stroke-width:1px
-
-    class A planner
-    class B,C,D worker
-    class E database
-    class F manager
+ \```
 
 Система построена по гибридной архитектуре "Master-Worker" в рамках парадигмы MapReduce.
 
