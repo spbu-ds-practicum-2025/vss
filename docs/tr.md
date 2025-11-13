@@ -105,7 +105,7 @@ flowchart TD
         Workers
         n5["Task_Manager"]
         n6["DB_TM"]
-        n9["Shuffle_Manager"]
+        n9["Data_Manager"]
         n1["Message_queue"]
         C["Planner"]
         B["Gateaway_API"]
@@ -121,25 +121,6 @@ flowchart TD
     n1@{ shape: rect}
     B@{ shape: rect}
     n7@{ shape: disk}
-     n2:::Sky
-     n3:::Sky
-     n4:::Sky
-     n5:::Peach
-     n6:::Class_02
-     n9:::Peach
-     n1:::Class_01
-     C:::Rose
-     B:::Aqua
-     n7:::Class_02
-     A:::Ash
-    classDef Sky stroke-width:1px, stroke-dasharray:none, stroke:#374D7C, fill:#E2EBFF, color:#374D7C
-    classDef Pine stroke-width:1px, stroke-dasharray:none, stroke:#254336, fill:#27654A, color:#FFFFFF
-    classDef Peach stroke-width:1px, stroke-dasharray:none, stroke:#FBB35A, fill:#FFEFDB, color:#8F632D
-    classDef Rose stroke-width:1px, stroke-dasharray:none, stroke:#FF5978, fill:#FFDFE5, color:#8E2236
-    classDef Aqua stroke-width:1px, stroke-dasharray:none, stroke:#46EDC8, fill:#DEFFF8, color:#378E7A
-    classDef Ash stroke-width:1px, stroke-dasharray:none, stroke:#999999, fill:#EEEEEE, color:#000000
-    classDef Class_01 fill:#E1BEE7
-    classDef Class_02 stroke-width:2px, stroke-dasharray: 0, stroke:#FFFFFF, fill:#C8E6C9
 ```
 
 Система построена по гибридной архитектуре "Master-Worker" в рамках парадигмы MapReduce.
@@ -154,11 +135,16 @@ flowchart TD
 
 
 **Planner**
-- Принимает задачи от пользователя и выдает результаты
-- Разбивает документы на чанки (параметризуемое количество)
+- Принимает задачи от API Gateaway 
 - Распределяет Map и Reduce задачи между Worker узлами через брокер сообщений
 - Обрабатывает сбои узлов с механизмом дедупликации
-- Уведомляет пользователя о завершении
+- Отправляет результаты в API Gateaway
+
+
+**API Gateaway**
+- Получает от пользователя задачу через HTTP-запрос
+- Отправляет пользователю результат через HTTP-запрос
+
 
 **Data Manager**
 - Принимает от Planner'а документ пользователя и делит его на заданное количество чанков
@@ -228,7 +214,7 @@ flowchart TD
    
 ### Сценарий 2: Обработка сбоя узла во время Map-фазы
 
-1. Worker Node перестает отвечать во время выполнения Map-задачи
+1. Worker Node перестает отправлять сигналы во время выполнения Map-задачи
 2. Task Manager обнаруживает сбой через механизм health-check (таймауты)
 3. Planner проверяет в БД - промежуточные результаты не сохранены
 4. Planner повторно ставит Map-задачу в очередь
@@ -250,7 +236,7 @@ flowchart TD
 3. **Реализация Worker узлов** (выполнение Map операций - разбиение текста на слова)
 4. **Реализация базового Shuffle & Sort** (группировка промежуточных данных по словам)
 5. **Интеграция с базой данных** (хранение документов, промежуточных и финальных результатов)
-6. **Реализация брокера сообщений** (асинхронная коммуникация между компонентами)
+6. **Интеграция брокера сообщений RabbitMQ** (асинхронная коммуникация между компонентами)
 7. **Базовая отказоустойчивость** (повторная обработка задач при сбоях Worker узлов)
 8. **Интеграционное тестирование** (проверка работы всей цепочки обработки от загрузки до выдачи результата)
 
