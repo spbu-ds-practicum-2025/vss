@@ -60,8 +60,8 @@ def callback(ch, method, properties, body):
     def process_reduce_task(file_address: str, part_num: int):
         # reducing phase
 
-        if not os.path.exists(SPILL_FILES_DIR):
-            raise FileNotFoundError(f"Spill files dir not found: {SPILL_FILES_DIR}")
+        if not os.path.exists(SHUFFLE_FILES_DIR):
+            raise FileNotFoundError(f"Spill files dir not found: {SHUFFLE_FILES_DIR}")
 
         reducer = WordCountReducer()
         reduce_executor = ReduceExecutor(reducer,

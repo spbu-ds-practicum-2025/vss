@@ -10,6 +10,8 @@ RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
 RABBIT_PORT = 5672
 
+TASK_ID = str(uuid.uuid4())
+
 # undone: implement file splitting
 def split_txt_file(input_file: str, lines_per_file: int = 1_000_000) -> list:
     ...
@@ -18,7 +20,7 @@ def split_txt_file(input_file: str, lines_per_file: int = 1_000_000) -> list:
 def send_map_task(ch, task_type: str, address: str):
 
     task = {
-        "task_id": str(uuid.uuid4()),
+        "task_id": TASK_ID,
         "type": task_type,
         "address": address,
         "created_at": time.time()
@@ -32,12 +34,11 @@ def send_map_task(ch, task_type: str, address: str):
     print(f"[Planner] sent task {task['task_id']} type={task_type}")
 
 
-def send_reduce_task(ch, task_type: str, address: str, part_id: int):
+def send_reduce_task(ch, task_type: str, part_id: int):
 
     task = {
-        "task_id": str(uuid.uuid4()),
+        "task_id": TASK_ID,
         "type": task_type,
-        "address": address,
         "part_id": part_id,
         "created_at": time.time()
     }
@@ -57,8 +58,8 @@ def main():
     ch = conn.channel()
     ch.queue_declare(queue=QUEUE_NAME, durable=True)
 
-    # send_map_task(ch, "map", r"C:\ovr_pr\large_test_words.txt")
-    send_reduce_task(ch, "reduce", r"C:\ovr_pr\vss\services\worker\shuffle_files", part_id=0)
+    send_map_task(ch, "map", r"C:\ovr_pr\large_test_words.txt")
+    send_reduce_task(ch, "reduce", part_id=0)
 
     conn.close()
 
