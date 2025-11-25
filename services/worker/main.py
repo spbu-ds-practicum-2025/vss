@@ -1,4 +1,4 @@
-from worker import WordCountMapper, MapExecutor, WordCountShuffler, ShuffleExecutor, WordCountReducer, ReduceExcecutor, DataManager
+from worker import WordCountMapper, MapExecutor, WordCountShuffler, ShuffleExecutor, WordCountReducer, ReduceExecutor, DataManager
 from loaders import txtDataSource, jsonDataSink, txtDataSink, jsonDataSource
 
 import shutil
@@ -15,53 +15,8 @@ RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
 RABBIT_PORT = 5672
 
-SPILL_FILES_DIR = r"C:\ovr_pr\vss\services\worker\spill_files"
-SHUFFLE_FILES_DIR = r"C:\ovr_pr\vss\services\worker\shuffle_files"
-REDUCE_OUTPUT_DIR = r"C:\ovr_pr\vss\services\worker\reduce_output"
-
-DIRS = [SPILL_FILES_DIR, SHUFFLE_FILES_DIR, REDUCE_OUTPUT_DIR]
-
-
-def cleanup_previous_run_dirs(dirs: list):
-    for d in dirs:
-        if os.path.exists(d):
-            shutil.rmtree(d)
-
-
-def process_map_task(file_address: str):
-    cleanup_previous_run_dirs(DIRS)
-
-    # mapping phase
-    mapper = WordCountMapper()
-    data_spill_saver = jsonDataSink(SPILL_FILES_DIR, mode="jsonl")
-    data_sorce = txtDataSource()
-    
-    map_executor = MapExecutor(mapper, data_spill_saver, data_sorce, threshold=5_000)
-    map_executor.process(filepath=file_address)
-
-    print("Mapping phase completed. Starting shuffling phase...")
-
-    # shuffling phase
-
-    shuffler = WordCountShuffler(num_parts=4, flush_threshold=2_000)
-    shuffle_executor = ShuffleExecutor(shuffler, 
-                                    source=jsonDataSource(),
-                                        sink=jsonDataSink(SHUFFLE_FILES_DIR, mode="jsonl"))
-    shuffle_executor.process(SPILL_FILES_DIR)
-    print("Shuffling phase completed.")
-
-
-def process_reduce_task(file_address: str, part_num: int):
-        # reducing phase
-        reducer = WordCountReducer()
-        reduce_executor = ReduceExcecutor(reducer,
-                                        sink=jsonDataSink(REDUCE_OUTPUT_DIR, mode="jsonl"),
-                                        source=jsonDataSource())
-        
-        reduce_executor.process(part_dir=SHUFFLE_FILES_DIR, part_num=part_num)
-
-        print("Reducing phase completed.")
-    
+# numsber of retries for failed tasks
+MAX_RETRIES = 3
 
 def callback(ch, method, properties, body):
     # if message is not valid JSON — ack and skip
@@ -73,6 +28,56 @@ def callback(ch, method, properties, body):
         return
 
     print(f"[{WORKER_ID}] picked {task.get('task_id')}")
+
+    SPILL_FILES_DIR = rf"storage\{task.get('task_id')}\spill_files"
+    SHUFFLE_FILES_DIR = rf"storage\{task.get('task_id')}\shuffle_files"
+    REDUCE_OUTPUT_DIR = rf"storage\{task.get('task_id')}\reduce_output"
+
+
+    def process_map_task(file_address: str):
+
+        # mapping phase
+        mapper = WordCountMapper()
+        data_spill_saver = jsonDataSink(SPILL_FILES_DIR, mode="jsonl")
+        data_sorce = txtDataSource()
+        
+        map_executor = MapExecutor(mapper, data_spill_saver, data_sorce, threshold=5_000)
+        map_executor.process(filepath=file_address)
+
+        print("Mapping phase completed. Starting shuffling phase...")
+
+        # shuffling phase
+
+        shuffler = WordCountShuffler(num_parts=4, flush_threshold=2_000)
+        shuffle_executor = ShuffleExecutor(shuffler, 
+                                        source=jsonDataSource(),
+                                            sink=jsonDataSink(SHUFFLE_FILES_DIR, mode="jsonl"))
+        shuffle_executor.process(SPILL_FILES_DIR)
+        print("Shuffling phase completed.")
+        shutil.rmtree(SPILL_FILES_DIR)
+
+
+    def process_reduce_task(file_address: str, part_num: int):
+        # reducing phase
+
+        if not os.path.exists(SPILL_FILES_DIR):
+            raise FileNotFoundError(f"Spill files dir not found: {SPILL_FILES_DIR}")
+
+        reducer = WordCountReducer()
+        reduce_executor = ReduceExecutor(reducer,
+                                        sink=jsonDataSink(REDUCE_OUTPUT_DIR, mode="jsonl"),
+                                        source=jsonDataSource())
+        
+        reduce_executor.process(part_dir=SHUFFLE_FILES_DIR, part_num=part_num)
+
+        print("Reducing phase completed.")
+        shutil.rmtree(SHUFFLE_FILES_DIR)
+
+    headers = {}
+    if properties is not None:
+        # properties.headers может быть None или dict
+        headers = properties.headers or {}
+    attempts = int(headers.get('x-attempts', 0))
 
     try:
         if task.get('type') == 'map':
@@ -86,8 +91,31 @@ def callback(ch, method, properties, body):
 
     except Exception as e:
         print(f"[{WORKER_ID}] error processing {task.get('task_id')}: {e}")
-        # В простом варианте: nack и requeue=True (вернётся в очередь)
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+        # retry logic
+        if attempts + 1 >= MAX_RETRIES:
+            # отправляем в dead-letter, передав attempts для истории
+            headers['x-attempts'] = attempts + 1
+            ch.basic_publish(
+                exchange='',
+                routing_key='tasks.dead',
+                body=body,
+                properties=pika.BasicProperties(headers=headers, delivery_mode=2)
+            )
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            print(f"[{WORKER_ID}] sent to dead queue: attempts={attempts+1}")
+
+        else:
+            # републикуем задачу с увеличенным counter (и ack текущую)
+            headers['x-attempts'] = attempts + 1
+            ch.basic_publish(
+                exchange='',
+                routing_key=QUEUE_NAME,
+                body=body,
+                properties=pika.BasicProperties(headers=headers, delivery_mode=2)
+            )
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            print(f"[{WORKER_ID}] requeued task (attempt {attempts+1})")
 
 
 def main():
@@ -114,25 +142,3 @@ if __name__ == "__main__":
     main()
 
 
-
-
-    # reducing phase
-    # reducer = WordCountReducer()
-    # reduce_executor = ReduceExcecutor(reducer,
-    #                                   sink=jsonDataSink(r"C:\ovr_pr\worker\reduce_output", mode="jsonl"),
-    #                                   source=jsonDataSource())
-    # for part_num in range(4):
-    #     reduce_executor.process(part_dir=r"C:\ovr_pr\worker\shuffle_files", part_num=part_num)
-
-    # print("Reducing phase completed.")
-
-    # # data management phase
-
-    # dirs = [r'C:\ovr_pr\worker\spill_files',
-    #     r'C:\ovr_pr\worker\shuffle_files']
-    
-    # for d in dirs:
-    #     if os.path.exists(d):
-    #         shutil.rmtree(d)
-    
-    # DataManager.manage_reduce_data(source=jsonDataSource(), sink=txtDataSink(r"C:\ovr_pr\worker\final_output"), dirpath=r"C:\ovr_pr\worker\reduce_output")
