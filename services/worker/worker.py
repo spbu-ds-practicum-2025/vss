@@ -135,7 +135,7 @@ class ShuffleExecutor:
         self.shuffler.flush(self.sink)
 
 
-class ReduceExcecutor:
+class ReduceExecutor:
     '''
         Executor for the reducing phase
     '''
