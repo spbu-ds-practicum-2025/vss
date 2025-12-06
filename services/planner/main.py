@@ -17,7 +17,7 @@ RABBIT_PORT = 5672
 TASK_ID = str(uuid.uuid4())
 
 
-def split_and_upload_txt(input_file: str, lines_per_file: int = 1_000_000, bucket="mapreduce-data", prefix="chunks/"):
+def split_and_upload_txt(input_file: str, lines_per_file: int = 1_000_000, bucket="mapreduce", prefix="chunks/"):
     '''Splits a large txt file into smaller parts and uploads them to MinIO.'''
 
     with open(input_file, 'r', encoding='utf-8') as f:
@@ -48,24 +48,20 @@ def split_and_upload_txt(input_file: str, lines_per_file: int = 1_000_000, bucke
             os.remove(part_file)
 
 
-
-
-
-def send_map_task(ch, task_type: str, address: str):
-
+def send_map_task(ch, task_type: str, address: str, storage: str = "minio", bucket: str = "mapreduce"):
     task = {
         "task_id": TASK_ID,
         "type": task_type,
-        "address": address,
+        "address": address,   # s3 key, например "chunks/large_test_words.txt_part0.txt"
+        "storage": storage,   # "minio" или "local"
+        "bucket": bucket,
         "created_at": time.time()
     }
     body = json.dumps(task)
-
-    # delivery_mode=2 — сделать сообщение persistent
     props = pika.BasicProperties(delivery_mode=2, content_type='application/json')
     ch.basic_publish(exchange='', routing_key=QUEUE_NAME, body=body, properties=props)
+    print(f"[Planner] sent task {task['task_id']} type={task_type} address={address} storage={storage}")
 
-    print(f"[Planner] sent task {task['task_id']} type={task_type}")
 
 
 def send_reduce_task(ch, task_type: str, part_id: int):
@@ -92,12 +88,13 @@ def main():
     ch = conn.channel()
     ch.queue_declare(queue=QUEUE_NAME, durable=True)
 
-    send_map_task(ch, "map", r"C:\ovr_pr\large_test_words.txt")
-    send_reduce_task(ch, "reduce", part_id=0)
+    send_map_task(ch, "map", address="chunks/large_test_words.txt_part1.txt", storage="minio", bucket="mapreduce")
+
+    # send_reduce_task(ch, "reduce", part_id=0)
 
     conn.close()
 
 
 if __name__ == "__main__":
-    split_and_upload_txt(r"C:\ovr_pr\large_test_words.txt", lines_per_file=1_000_000, bucket="mapreduce", prefix="chunks/")
-
+    # split_and_upload_txt(r"C:\ovr_pr\large_test_words.txt", lines_per_file=1_000_000, bucket="mapreduce", prefix="chunks/")
+    main()
