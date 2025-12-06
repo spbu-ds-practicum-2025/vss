@@ -140,6 +140,9 @@ def callback(ch, method, properties, body):
                 
             print("Upload of shuffle files completed.")
 
+            print(f"Cleaning up local files for task {task.get('task_id')}")
+            shutil.rmtree(os.path.join("storage", task.get('task_id'))) 
+            print("Cleanup completed.")
  
 
 
