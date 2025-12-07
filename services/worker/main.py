@@ -27,7 +27,8 @@ def download_input_file(task: dict) -> str:
     Raises informative exceptions on bad input.
     """
     task_id = task.get('task_id') or 'unknown'
-    local_dir = os.path.join("storage", task_id)
+    main_task_id = task.get('main_task_id') or 'unknown'
+    local_dir = os.path.join("storage", main_task_id, task_id)
     local_path = os.path.join(local_dir, "input_file.txt")
 
     # ensure storage dir exists
@@ -72,9 +73,9 @@ def callback(ch, method, properties, body):
 
     print(f"[{WORKER_ID}] picked {task.get('task_id')}")
 
-    SPILL_FILES_DIR = rf"storage\{task.get('task_id')}\spill_files"
-    SHUFFLE_FILES_DIR = rf"storage\{task.get('task_id')}\shuffle_files"
-    REDUCE_OUTPUT_DIR = rf"storage\{task.get('task_id')}\reduce_output"
+    SPILL_FILES_DIR = rf"storage\{task.get('main_task_id')}\{task.get('task_id')}\spill_files"
+    SHUFFLE_FILES_DIR = rf"storage\{task.get('main_task_id')}\{task.get('task_id')}\shuffle_files"
+    REDUCE_OUTPUT_DIR = rf"storage\{task.get('main_task_id')}\{task.get('task_id')}\reduce_output"
             
 
     def process_map_task(file_address: str):
@@ -123,6 +124,9 @@ def callback(ch, method, properties, body):
         headers = properties.headers or {}
     attempts = int(headers.get('x-attempts', 0))
 
+    main_task_id = task.get('main_task_id')
+    worker_task_id = task.get('task_id')
+
 
     try:
         input_file = download_input_file(task)
@@ -130,20 +134,63 @@ def callback(ch, method, properties, body):
         if task.get('type') == 'map':
             process_map_task(input_file)
             ch.basic_ack(delivery_tag=method.delivery_tag) 
-            print(f"[{WORKER_ID}] completed {task.get('task_id')} type=map")
-            
-            print(f"trying to upload shuffle files from {SHUFFLE_FILES_DIR}")
-            for filename in os.listdir(SHUFFLE_FILES_DIR):
-                upload_file(os.path.join(SHUFFLE_FILES_DIR, filename), 
-                            bucket="mapreduce",
-                            key=f"shuffle/{task.get('task_id')}/{filename}")
-                
-            print("Upload of shuffle files completed.")
+            # --- upload shuffle files to S3 (simple, robust) ---
+            if not main_task_id:
+                raise ValueError("Missing main_task_id in task")
 
-            print(f"Cleaning up local files for task {task.get('task_id')}")
-            shutil.rmtree(os.path.join("storage", task.get('task_id'))) 
-            print("Cleanup completed.")
- 
+            local_shuffle_dir = SHUFFLE_FILES_DIR
+
+            if not os.path.isdir(local_shuffle_dir):
+                print(f"[{WORKER_ID}] no shuffle dir at {local_shuffle_dir}, nothing to upload")
+            else:
+                print(f"[{WORKER_ID}] uploading shuffle files from {local_shuffle_dir} to bucket 'mapreduce'")
+
+                upload_failures = []
+                uploaded = 0
+
+                import re
+                for filename in sorted(os.listdir(local_shuffle_dir)):
+                    local_path = os.path.join(local_shuffle_dir, filename)
+                    if not os.path.isfile(local_path):
+                        continue
+
+                    # try to detect part index from filename, fallback to 'unknown'
+                    m = re.search(r'part[_\-]?(\d+)', filename, flags=re.IGNORECASE)
+                    if m:
+                        part_idx = int(m.group(1))
+                    else:
+                        # try a leading number like "0_" or "0."
+                        m2 = re.match(r'^(\d+)[_\.\-]', filename)
+                        part_idx = int(m2.group(1)) if m2 else "unknown"
+
+                    s3_key = f"{main_task_id}/parts/part_{part_idx}/{worker_task_id}_{filename}"
+                    try:
+                        # upload_file(local_path, bucket, key)
+                        upload_file(local_path, bucket="mapreduce", key=s3_key)
+                        uploaded += 1
+                        print(f"[{WORKER_ID}] uploaded {filename} -> {s3_key}")
+                    except Exception as e:
+                        upload_failures.append((filename, str(e)))
+                        print(f"[{WORKER_ID}] ERROR uploading {filename}: {e}")
+
+                if upload_failures:
+                    # don't remove anything if uploads weren't all successful
+                    print(f"[{WORKER_ID}] upload finished with {len(upload_failures)} failures: {upload_failures}")
+                    raise RuntimeError(f"Upload errors: {len(upload_failures)} files failed")
+                else:
+                    print(f"[{WORKER_ID}] Upload completed. {uploaded} files uploaded.")
+
+                    # cleanup local task folder (safe remove)
+                    local_task_dir = os.path.join("storage", main_task_id, worker_task_id)
+                    if os.path.isdir(local_task_dir):
+                        try:
+                            shutil.rmtree(local_task_dir)
+                            print(f"[{WORKER_ID}] cleaned up local files: {local_task_dir}")
+                        except Exception as e:
+                            print(f"[{WORKER_ID}] warning: failed to remove {local_task_dir}: {e}")
+                    else:
+                        print(f"[{WORKER_ID}] nothing to cleanup at {local_task_dir}")
+            # --- end upload block ---
 
 
         elif task.get('type') == 'reduce':
