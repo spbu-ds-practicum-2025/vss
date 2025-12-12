@@ -89,11 +89,11 @@ def main():
         task_id = str(uuid.uuid4())
         send_task(ch, "map", address=file_key, main_task_id=MAIN_TASK_ID, task_id=task_id, storage="minio", bucket=BUCKET_NAME)
 
-    # send_task(ch, "map", address="chunks/large_test_words.txt_part0.txt", storage="minio", bucket="mapreduce")
+    for part_num in range(4):  # предполагаем 4 части для редьюса
+        send_task(ch, "reduce", address=str(part_num), main_task_id=MAIN_TASK_ID, task_id=str(uuid.uuid4()), storage="minio", bucket=BUCKET_NAME)
 
     conn.close()
 
 
 if __name__ == "__main__":
-    # split_and_upload_txt(r"C:\ovr_pr\large_test_words.txt", lines_per_file=1_000_000, bucket="mapreduce", prefix="chunks/")
     main()

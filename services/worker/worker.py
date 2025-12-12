@@ -147,10 +147,9 @@ class ReduceExecutor:
     def process(self, part_dir:str, part_num:int) -> None:
         mapped_data = []
         for file in os.listdir(part_dir):  
-            if file.startswith(f"part_{part_num}"):
-                filepath = os.path.join(part_dir, file)
-                for record in self.source.load(filepath):
-                    mapped_data.append(record)
+            filepath = os.path.join(part_dir, file)
+            for record in self.source.load(filepath):
+                mapped_data.append(record)
                 
         reduced_data = self.worker.do_reduce(mapped_data)
         self.sink.save(reduced_data, name=f'reduced_{part_num}')

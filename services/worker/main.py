@@ -1,7 +1,8 @@
 from worker import WordCountMapper, MapExecutor, WordCountShuffler, ShuffleExecutor, WordCountReducer, ReduceExecutor, DataManager
 from loaders import txtDataSource, jsonDataSink, txtDataSink, jsonDataSource
 
-from storage_client import download_file, upload_file
+from storage_client.client import download_file, upload_file, list_objects
+
 
 import shutil
 import os
@@ -19,6 +20,38 @@ RABBIT_PORT = 5672
 
 # numsber of retries for failed tasks
 MAX_RETRIES = 3
+
+def download_part_files(main_task_id: str, part_num: int, bucket: str = "mapreduce") -> str:
+    """
+    Download all shuffle part files for a specific part number from S3 into local storage.
+
+    Args:
+        main_task_id (str): ID of the whole MapReduce job.
+        part_num (int): Partition number (the "N" in part_N).
+        bucket (str): S3 bucket name.
+
+    Returns:
+        str: Path to the local directory containing downloaded part files.
+    """
+
+    # S3 prefix: MAIN_TASK_ID/shuffle/part_{n}/
+    prefix = f"{main_task_id}/parts/part_{part_num}/"
+
+    # Local directory where files will be stored
+    local_dir = os.path.join("storage", main_task_id, "parts", f"part_{part_num}")
+    os.makedirs(local_dir, exist_ok=True)
+
+    # List all objects in this prefix
+    objects = list_objects(bucket, prefix)
+    if not objects:
+        raise FileNotFoundError(f"No files found in S3 path: {prefix}")
+
+    # Download all of them
+    for obj_key in objects:
+        local_path = os.path.join(local_dir, os.path.basename(obj_key))
+        download_file(bucket, obj_key, local_path)
+
+    return local_dir
 
 
 def download_input_file(task: dict) -> str:
@@ -101,20 +134,21 @@ def callback(ch, method, properties, body):
         shutil.rmtree(SPILL_FILES_DIR)
 
 
-    def process_reduce_task(file_address: str, part_num: int):
+    def process_reduce_task(part_num: int):
         # reducing phase
-
-        if not os.path.exists(SHUFFLE_FILES_DIR):
-            raise FileNotFoundError(f"Spill files dir not found: {SHUFFLE_FILES_DIR}")
-
+        print("Starting reducing phase...")
         reducer = WordCountReducer()
+        part_dir = download_part_files(task.get('main_task_id'), part_num, bucket=task.get('bucket', 'mapreduce'))
+        print(f"Downloaded part files to {part_dir}")
+
         reduce_executor = ReduceExecutor(reducer,
                                         sink=jsonDataSink(REDUCE_OUTPUT_DIR, mode="jsonl"),
                                         source=jsonDataSource())
         
-        reduce_executor.process(part_dir=SHUFFLE_FILES_DIR, part_num=part_num)
+        reduce_executor.process(part_dir=part_dir, part_num=part_num)
 
         print("Reducing phase completed.")
+        print(f"Reduce output stored in: {REDUCE_OUTPUT_DIR}")
 
 
 
@@ -129,9 +163,9 @@ def callback(ch, method, properties, body):
 
 
     try:
-        input_file = download_input_file(task)
 
         if task.get('type') == 'map':
+            input_file = download_input_file(task)
             process_map_task(input_file)
             ch.basic_ack(delivery_tag=method.delivery_tag) 
             # --- upload shuffle files to S3 (simple, robust) ---
@@ -190,12 +224,15 @@ def callback(ch, method, properties, body):
                             print(f"[{WORKER_ID}] warning: failed to remove {local_task_dir}: {e}")
                     else:
                         print(f"[{WORKER_ID}] nothing to cleanup at {local_task_dir}")
-            # --- end upload block ---
 
 
         elif task.get('type') == 'reduce':
-            process_reduce_task(input_file, task.get('part_id'))
-            ch.basic_ack(delivery_tag=method.delivery_tag) 
+            process_reduce_task(int(task.get('address')))
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            s3_key = f"{main_task_id}/reduce_output/reduced_part_{task.get('address')}.jsonl"
+            local_reduce_file = os.path.join(REDUCE_OUTPUT_DIR, f"reduced_{task.get('address')}.jsonl")
+            upload_file(local_reduce_file, bucket="mapreduce", key=s3_key)
+
             print(f"[{WORKER_ID}] completed {task.get('task_id')} type=reduce part_id={task.get('part_id')}")
 
     except Exception as e:
