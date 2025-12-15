@@ -169,7 +169,7 @@ class DataManager:
                 combined_data.update(record)
 
         combined_data = dict(sorted(combined_data.items(), key=lambda item: item[0]))
-        sink.save(combined_data, name='result')
+        sink.save(combined_data, name='final_result')
         return combined_data
     
     
