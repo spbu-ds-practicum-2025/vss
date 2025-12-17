@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: storage_client
+Version: 0.0.1
+Summary: Shared MinIO/S3 client for local dev (editable install)
+Author: you
+Requires-Dist: boto3
+Requires-Dist: python-dotenv
