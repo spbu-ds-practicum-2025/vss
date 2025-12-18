@@ -1,7 +1,7 @@
-from worker import WordCountMapper, MapExecutor, WordCountShuffler, ShuffleExecutor, WordCountReducer, ReduceExecutor
-from loaders import txtDataSource, jsonDataSink, jsonDataSource
+from libs.worker.worker import WordCountMapper, MapExecutor, WordCountShuffler, ShuffleExecutor, WordCountReducer, ReduceExecutor
+from libs.worker.loaders import txtDataSource, jsonDataSink, jsonDataSource
 
-from storage_client.client import download_file, upload_file, list_objects
+from libs.storage_client.client import download_file, upload_file, list_objects
 
 
 import shutil
