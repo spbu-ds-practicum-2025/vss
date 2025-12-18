@@ -89,8 +89,8 @@ def main():
         task_id = str(uuid.uuid4())
         send_task(ch, "map", address=file_key, main_task_id=MAIN_TASK_ID, task_id=task_id, storage="minio", bucket=BUCKET_NAME)
 
-    for part_num in range(4):  # предполагаем 4 части для редьюса
-        send_task(ch, "reduce", address=str(part_num), main_task_id=MAIN_TASK_ID, task_id=str(uuid.uuid4()), storage="minio", bucket=BUCKET_NAME)
+    # for part_num in range(4):  # предполагаем 4 части для редьюса
+    #     send_task(ch, "reduce", address=str(part_num), main_task_id=MAIN_TASK_ID, task_id=str(uuid.uuid4()), storage="minio", bucket=BUCKET_NAME)
 
     conn.close()
 

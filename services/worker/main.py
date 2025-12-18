@@ -8,9 +8,15 @@ import shutil
 import os
 import pika
 import json
+import uuid
+import threading
+import time
+
+
 
 QUEUE_NAME = 'tasks'
-WORKER_ID = "1"
+WORKER_ID = str(uuid.uuid4())[:8]
+
 
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
@@ -19,6 +25,33 @@ RABBIT_PORT = 5672
 
 # numsber of retries for failed tasks
 MAX_RETRIES = 3
+
+
+def heartbeat_loop():
+    creds = pika.PlainCredentials(RABBIT_LOGIN, RABBIT_PASS)
+    params = pika.ConnectionParameters(
+        host=RABBIT_HOST,
+        port=RABBIT_PORT,
+        credentials=creds
+    )
+
+    conn = pika.BlockingConnection(params)
+    ch = conn.channel()
+    ch.queue_declare(queue='worker.heartbeat', durable=False)
+
+    while True:
+        msg = {
+            "worker_id": WORKER_ID,
+            "ts": time.time()
+        }
+        ch.basic_publish(
+            exchange='',
+            routing_key='worker.heartbeat',
+            body=json.dumps(msg)
+        )
+        time.sleep(3)
+
+
 
 def download_part_files(main_task_id: str, part_num: int, bucket: str = "mapreduce") -> str:
     """
@@ -276,6 +309,9 @@ def main():
 
     print(f"[{WORKER_ID}] waiting for tasks. To exit press CTRL+C")
     try:
+        t = threading.Thread(target=heartbeat_loop, daemon=True)
+        t.start()
+
         ch.start_consuming()
     except KeyboardInterrupt:
         ch.stop_consuming()
