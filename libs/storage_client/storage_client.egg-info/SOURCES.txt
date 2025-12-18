@@ -1,0 +1,9 @@
+pyproject.toml
+storage_client/__init__.py
+storage_client/client.py
+storage_client/config.py
+storage_client.egg-info/PKG-INFO
+storage_client.egg-info/SOURCES.txt
+storage_client.egg-info/dependency_links.txt
+storage_client.egg-info/requires.txt
+storage_client.egg-info/top_level.txt
