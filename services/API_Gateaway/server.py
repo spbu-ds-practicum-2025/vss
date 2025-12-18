@@ -4,6 +4,7 @@ from fastapi.responses import PlainTextResponse, FileResponse
 from typing import Annotated, Optional
 from pydantic import BaseModel
 import os, shutil
+import "libs/storage_client.upload_file" as storage_upload_file
 
 API_Gateaway=FastAPI()
 
@@ -17,6 +18,8 @@ async def upload_file(file: Annotated[UploadFile, File(...)])->str:
         pass
     with open('process.txt', 'w', encoding='utf-8') as f:
         f.write(text_content)
+    storage_upload_file('process.txt', 'mapreduce', 'process.txt')
+    os.remove('process.txt')
 
     return "File delivered"
 
