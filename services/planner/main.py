@@ -5,16 +5,20 @@ import uuid
 import time
 import os
 
-from storage_client import upload_file
+from libs.storage_client.client import upload_file
 
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
+<<<<<<< HEAD
 RABBIT_PORT = 5672
 
 TASKS_QUEUE = 'tasks'
 WORKER_EVENTS_QUEUE = 'events.worker'   # consumed by Task Manager
 PLANNER_EVENTS_QUEUE = 'events.planner' # planner listens here (from Task Manager)
+=======
+RABBIT_PORT = 7672
+>>>>>>> main
 
 NUM_REDUCE_PARTS = 4
 BUCKET_NAME = "mapreduce"
@@ -234,6 +238,7 @@ def main():
     conn = pika.BlockingConnection(params)
     ch = conn.channel()
 
+<<<<<<< HEAD
     # queues
     ch.queue_declare(queue=TASKS_QUEUE, durable=True)
     ch.queue_declare(queue=WORKER_EVENTS_QUEUE, durable=True)
@@ -241,6 +246,11 @@ def main():
 
     MAIN_TASK_ID = "1"
     INPUT_FILE = r"C:\ovr_pr\large_test_words.txt"
+=======
+    MAIN_TASK_ID = '1'
+    INPUT_FILE = r"large_test_words.txt"
+    BUCKET_NAME = "mapreduce"
+>>>>>>> main
 
     print("[Planner] splitting input file...")
     files = split_and_upload_txt(
