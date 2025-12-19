@@ -5,7 +5,7 @@ services:
     hostname: rabbitmq
     restart: unless-stopped
     ports:
-      - "5672:5672"   # AMQP protocol
+      - "7672:5672"   # AMQP protocol
       - "15672:15672" # Management UI
     environment:
       - RABBITMQ_DEFAULT_USER=admin
