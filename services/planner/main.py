@@ -3,17 +3,28 @@ import json
 import uuid
 import time
 import os
+import queue
 
-from libs.storage_client.storage_client import upload_file
+from libs.storage_client.client import upload_file
 
 
-QUEUE_NAME = 'tasks'
+QUEUE_NAME_1 = 'tasks'
+QUEUE_NAME_2 = 'user_requests'
+
 
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
 RABBIT_PORT = 5672
 
+recieved_messages = queue.Queue()
+
+def get_task(ch, method, properties, body):
+
+    data = json.loads(body.decode('utf-8'))
+    print(f"[PLANNER] : got task {data}")
+    recieved_messages.put(data)
+    ch.basic_ack(delivery_tag=method.delivery_tag)
 
 def split_and_upload_txt(input_file: str, lines_per_file: int = 1_000_000, bucket="mapreduce", prefix="chunks/") -> list:
     '''Splits a large txt file into smaller parts and uploads them to MinIO.
@@ -65,33 +76,41 @@ def send_task(ch, task_type: str, address: str, main_task_id, task_id, storage: 
     }
     body = json.dumps(task)
     props = pika.BasicProperties(delivery_mode=2, content_type='application/json')
-    ch.basic_publish(exchange='', routing_key=QUEUE_NAME, body=body, properties=props)
+    ch.basic_publish(exchange='', routing_key=QUEUE_NAME_1, body=body, properties=props)
     print(f"[Planner] sent task {task['task_id']} type={task_type} address={address} storage={storage}")
 
 
 
 def main():
+    print(f"[PLANNER] started")
     credentials = pika.PlainCredentials(RABBIT_LOGIN, RABBIT_PASS)
     params = pika.ConnectionParameters(host=RABBIT_HOST, port=RABBIT_PORT, virtual_host='/', credentials=credentials)
     conn = pika.BlockingConnection(params)
     ch = conn.channel()
-    ch.queue_declare(queue=QUEUE_NAME, durable=True)
+    ch.queue_declare(queue=QUEUE_NAME_1, durable=True)
+    ch.queue_declare(queue=QUEUE_NAME_2, durable=True)
 
-    MAIN_TASK_ID = '1'
-    INPUT_FILE = r"large_test_words.txt"
-    BUCKET_NAME = "mapreduce"
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue=QUEUE_NAME_2, on_message_callback=get_task, auto_ack=False)
 
-    files = split_and_upload_txt(INPUT_FILE, lines_per_file=1_000_000, bucket=BUCKET_NAME, prefix=f"{MAIN_TASK_ID}/")
-    print(files)
+    ch.start_consuming()
 
-    for file_key in files:
-        task_id = str(uuid.uuid4())
-        send_task(ch, "map", address=file_key, main_task_id=MAIN_TASK_ID, task_id=task_id, storage="minio", bucket=BUCKET_NAME)
+    while True:
+        MAIN_TASK_ID = recieved_messages.get()
+        INPUT_FILE = f"{MAIN_TASK_ID}/input_file/process.txt"
+        BUCKET_NAME = "mapreduce"
 
-    for part_num in range(4):  # предполагаем 4 части для редьюса
-        send_task(ch, "reduce", address=str(part_num), main_task_id=MAIN_TASK_ID, task_id=str(uuid.uuid4()), storage="minio", bucket=BUCKET_NAME)
 
-    conn.close()
+        files = split_and_upload_txt(INPUT_FILE, lines_per_file=1_000_000, bucket=BUCKET_NAME, prefix=f"{MAIN_TASK_ID}/")
+        print(files)
+
+        for file_key in files:
+            task_id = str(uuid.uuid4())
+            send_task(ch, "map", address=file_key, main_task_id=MAIN_TASK_ID, task_id=task_id, storage="minio", bucket=BUCKET_NAME)
+
+        for part_num in range(4):  # предполагаем 4 части для редьюса
+            send_task(ch, "reduce", address=str(part_num), main_task_id=MAIN_TASK_ID, task_id=str(uuid.uuid4()), storage="minio", bucket=BUCKET_NAME)
+
 
 
 if __name__ == "__main__":
