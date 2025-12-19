@@ -1,2 +1,6 @@
 .vscode/
 .idea/
+**/__pycache__/
+services/Worker/storage/
+services/result.txt
+*.DS_Store
