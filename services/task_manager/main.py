@@ -8,7 +8,7 @@ from collections import defaultdict
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
-RABBIT_PORT = 5672
+RABBIT_PORT = 7672
 
 WORKER_EVENTS_QUEUE = 'events.worker'    # incoming: heartbeats, map.done, map.expected (from planner)
 PLANNER_EVENTS_QUEUE = 'events.planner'  # outgoing -> planner
