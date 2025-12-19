@@ -121,7 +121,7 @@ async def upload_process_file(file: Annotated[UploadFile, File(...)]) -> str:
 
     # Создаем подключение к RabbitMQ (как в оригинале, но с улучшениями)
     credentials = pika.PlainCredentials('admin', 'password')
-    params = pika.ConnectionParameters(host='localhost', port=5672, virtual_host='/', credentials=credentials)
+    params = pika.ConnectionParameters(host='localhost', port=7672, virtual_host='/', credentials=credentials)
     conn = pika.BlockingConnection(params)
     ch = conn.channel()
     ch.queue_declare(queue='user_requests', durable=True)

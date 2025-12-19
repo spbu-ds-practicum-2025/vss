@@ -1,4 +1,3 @@
-# planner.py
 import pika
 import json
 import uuid
@@ -6,11 +5,9 @@ import time
 import os
 import queue
 
-from libs.storage_client.client import upload_file, download_file
+from libs.storage_client.client import upload_file, upload_process_file, download_file
 
 
-QUEUE_NAME_1 = 'tasks'
-QUEUE_NAME_2 = 'user_requests'
 
 
 RABBIT_PASS = 'password'
@@ -23,6 +20,7 @@ WORKER_EVENTS_QUEUE = 'events.worker'        # consumed by Task Manager
 PLANNER_EVENTS_QUEUE = 'events.planner'       # planner listens here (from Task Manager)
 DATA_MANAGER_QUEUE = 'data_manager.requests'  # NEW: queue for requesting split from DataManager
 DATA_MANAGER_RESPONSE_QUEUE = 'data_manager.responses'  # NEW: queue where DataManager sends back chunk keys
+API_QUEUE = 'user_requests'
 
 NUM_REDUCE_PARTS = 4
 BUCKET_NAME = "mapreduce"
@@ -31,9 +29,16 @@ BUCKET_NAME = "mapreduce"
 main_tasks = {}
 correlation_ids = {}  # correlation_id -> main_task_id (to match responses)
 
+recieved_messages = queue.Queue()
 
-def send_task(ch, task_type: str, address: str, main_task_id: str, task_id: str,
-              storage: str = "minio", bucket: str = "mapreduce"):
+def get_task(ch, method, properties, body):
+
+    data = json.loads(body.decode('utf-8'))
+    print(f"[PLANNER] : got task {data}")
+    recieved_messages.put(data)
+    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+def send_task(ch, task_type: str, address: str, main_task_id, task_id, storage: str = "minio", bucket: str = "mapreduce"):
     task = {
         "main_task_id": main_task_id,
         "task_id": task_id,
@@ -53,7 +58,6 @@ def send_task(ch, task_type: str, address: str, main_task_id: str, task_id: str,
         )
     )
     print(f"[Planner] sent {task_type} task {task_id} address={address}")
-
 
 def request_split_from_data_manager(ch, input_key: str, main_task_id: str, prefix: str):
     correlation_id = str(uuid.uuid4())
@@ -245,6 +249,7 @@ def start_listeners(channel):
     channel.start_consuming()
 
 
+
 def main():
     print(f"[PLANNER] started")
     credentials = pika.PlainCredentials(RABBIT_LOGIN, RABBIT_PASS)
@@ -254,35 +259,45 @@ def main():
         virtual_host='/',
         credentials=credentials
     )
-
     conn = pika.BlockingConnection(params)
     ch = conn.channel()
-
     # Declare all queues
     ch.queue_declare(queue=TASKS_QUEUE, durable=True)
     ch.queue_declare(queue=WORKER_EVENTS_QUEUE, durable=True)
     ch.queue_declare(queue=PLANNER_EVENTS_QUEUE, durable=True)
     ch.queue_declare(queue=DATA_MANAGER_QUEUE, durable=True)
     ch.queue_declare(queue=DATA_MANAGER_RESPONSE_QUEUE, durable=True)
+    ch.queue_declare(queue=API_QUEUE, durable=True)
 
-    MAIN_TASK_ID = str(uuid.uuid4())[:8]
-    INPUT_FILE_LOCAL = r"C:\ovr_pr\large_test_words.txt"
-    INPUT_KEY = f"{MAIN_TASK_ID}/input.txt"  # key in MinIO
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue=API_QUEUE, on_message_callback=get_task, auto_ack=False)
 
-    print("[Planner] Uploading full input file to MinIO...")
-    upload_file(INPUT_FILE_LOCAL, BUCKET_NAME, INPUT_KEY)
-    print(f"[Planner] Uploaded input file as {INPUT_KEY}")
 
-    # Request split from DataManager
-    request_split_from_data_manager(
-        ch,
-        input_key=INPUT_KEY,
-        main_task_id=MAIN_TASK_ID,
-        prefix=f"{MAIN_TASK_ID}/"
-    )
+    # MAIN_TASK_ID = str(uuid.uuid4())[:8]
+    # INPUT_FILE_LOCAL = r"C:\ovr_pr\large_test_words.txt"
+    # INPUT_KEY = f"{MAIN_TASK_ID}/input.txt"  # key in MinIO
 
-    # Start listening for both TM events and DataManager responses
+    # print("[Planner] Uploading full input file to MinIO...")
+    # upload_file(INPUT_FILE_LOCAL, BUCKET_NAME, INPUT_KEY)
+    # print(f"[Planner] Uploaded input file as {INPUT_KEY}")
+
+    # # Request split from DataManager
+    # request_split_from_data_manager(
+    #     ch,
+    #     input_key=INPUT_KEY,
+    #     main_task_id=MAIN_TASK_ID,
+    #     prefix=f"{MAIN_TASK_ID}/"
+    # )
     start_listeners(ch)
+
+    while True:
+        MAIN_TASK_ID = recieved_messages.get()
+        INPUT_FILE = f"{MAIN_TASK_ID}/input_file/process.txt"
+        BUCKET_NAME = "mapreduce"
+
+
+
+
 
 
 if __name__ == "__main__":

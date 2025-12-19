@@ -26,6 +26,12 @@ services:
     volumes:
       - ./data:/data
 
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    restart: always
+
 volumes:
   rabbitmq_data:
   rabbitmq_logs:
