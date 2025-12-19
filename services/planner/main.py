@@ -1,4 +1,4 @@
-# planner.py  (replace your existing planner script content with this)
+# planner.py
 import pika
 import json
 import uuid
@@ -6,7 +6,7 @@ import time
 import os
 import queue
 
-from libs.storage_client.client import upload_file
+from libs.storage_client.client import upload_file, download_file
 
 
 QUEUE_NAME_1 = 'tasks'
@@ -19,74 +19,21 @@ RABBIT_HOST = 'localhost'
 RABBIT_PORT = 7672
 
 TASKS_QUEUE = 'tasks'
-WORKER_EVENTS_QUEUE = 'events.worker'   # consumed by Task Manager
-PLANNER_EVENTS_QUEUE = 'events.planner' # planner listens here (from Task Manager)
+WORKER_EVENTS_QUEUE = 'events.worker'        # consumed by Task Manager
+PLANNER_EVENTS_QUEUE = 'events.planner'       # planner listens here (from Task Manager)
+DATA_MANAGER_QUEUE = 'data_manager.requests'  # NEW: queue for requesting split from DataManager
+DATA_MANAGER_RESPONSE_QUEUE = 'data_manager.responses'  # NEW: queue where DataManager sends back chunk keys
 
 NUM_REDUCE_PARTS = 4
 BUCKET_NAME = "mapreduce"
 
-# In-memory minimal state to support requeues on worker failure
-# main_tasks[main_task_id] = {
-#   'chunks': [s3_key,...],
-#   'chunk_status': { s3_key: 'pending'|'done' },
-#   'task_map': { task_id: s3_key }
-# }
+# In-memory state
 main_tasks = {}
-
-def split_and_upload_txt(
-    input_file: str,
-    lines_per_file: int = 1_000_000,
-    bucket: str = "mapreduce",
-    prefix: str = ""
-) -> list:
-    """
-    Split txt into chunks and upload them to S3.
-    Returns list of S3 keys.
-    """
-    uploaded = []
-
-    with open(input_file, 'r', encoding='utf-8') as f:
-        part_idx = 0
-        buffer = []
-
-        for line in f:
-            buffer.append(line)
-            if len(buffer) >= lines_per_file:
-                part_name = f"{os.path.basename(input_file)}_part{part_idx}.txt"
-                with open(part_name, 'w', encoding='utf-8') as pf:
-                    pf.writelines(buffer)
-
-                key = f"{prefix}{part_name}"
-                upload_file(part_name, bucket, key)
-                uploaded.append(key)
-
-                os.remove(part_name)
-                buffer.clear()
-                part_idx += 1
-
-        if buffer:
-            part_name = f"{os.path.basename(input_file)}_part{part_idx}.txt"
-            with open(part_name, 'w', encoding='utf-8') as pf:
-                pf.writelines(buffer)
-
-            key = f"{prefix}{part_name}"
-            upload_file(part_name, bucket, key)
-            uploaded.append(key)
-
-            os.remove(part_name)
-
-    return uploaded
+correlation_ids = {}  # correlation_id -> main_task_id (to match responses)
 
 
-def send_task(
-    ch,
-    task_type: str,
-    address: str,
-    main_task_id: str,
-    task_id: str,
-    storage: str = "minio",
-    bucket: str = "mapreduce"
-):
+def send_task(ch, task_type: str, address: str, main_task_id: str, task_id: str,
+              storage: str = "minio", bucket: str = "mapreduce"):
     task = {
         "main_task_id": main_task_id,
         "task_id": task_id,
@@ -96,7 +43,6 @@ def send_task(
         "bucket": bucket,
         "created_at": time.time()
     }
-
     ch.basic_publish(
         exchange='',
         routing_key=TASKS_QUEUE,
@@ -106,32 +52,105 @@ def send_task(
             content_type='application/json'
         )
     )
-
     print(f"[Planner] sent {task_type} task {task_id} address={address}")
 
 
+def request_split_from_data_manager(ch, input_key: str, main_task_id: str, prefix: str):
+    correlation_id = str(uuid.uuid4())
+    correlation_ids[correlation_id] = main_task_id
+
+    message = {
+        "action": "split_txt",
+        "input_key": input_key,
+        "bucket": BUCKET_NAME,
+        "prefix": prefix,
+        "lines_per_file": 1_000_000,
+        "main_task_id": main_task_id,
+        "correlation_id": correlation_id
+    }
+
+    ch.basic_publish(
+        exchange='',
+        routing_key=DATA_MANAGER_QUEUE,
+        body=json.dumps(message),
+        properties=pika.BasicProperties(
+            delivery_mode=2,
+            correlation_id=correlation_id,
+            reply_to=DATA_MANAGER_RESPONSE_QUEUE
+        )
+    )
+    print(f"[Planner] requested split for {input_key} (prefix={prefix}), corr_id={correlation_id}")
+
+
+def data_manager_response_callback(ch, method, properties, body):
+    msg = json.loads(body)
+    correlation_id = properties.correlation_id
+
+    if correlation_id not in correlation_ids:
+        print(f"[Planner] Received response with unknown correlation_id {correlation_id}")
+        ch.basic_ack(method.delivery_tag)
+        return
+
+    main_task_id = correlation_ids.pop(correlation_id)
+    chunk_keys = msg.get("chunk_keys", [])
+
+    if not chunk_keys:
+        print(f"[Planner] Split failed for task {main_task_id}")
+        ch.basic_ack(method.delivery_tag)
+        return
+
+    print(f"[Planner] Received {len(chunk_keys)} chunks for task {main_task_id}")
+
+    # Initialize state
+    main_tasks[main_task_id] = {
+        "chunks": chunk_keys,
+        "chunk_status": {k: 'pending' for k in chunk_keys},
+        "task_map": {}
+    }
+
+    # Notify Task Manager about expected map tasks
+    ch.basic_publish(
+        exchange='',
+        routing_key=WORKER_EVENTS_QUEUE,
+        body=json.dumps({
+            "event": "map.expected",
+            "main_task_id": main_task_id,
+            "count": len(chunk_keys)
+        }),
+        properties=pika.BasicProperties(delivery_mode=2)
+    )
+
+    # Send map tasks
+    for key in chunk_keys:
+        task_id = str(uuid.uuid4())
+        main_tasks[main_task_id]['task_map'][task_id] = key
+        send_task(
+            ch,
+            task_type="map",
+            address=key,
+            main_task_id=main_task_id,
+            task_id=task_id,
+            storage="minio",
+            bucket=BUCKET_NAME
+        )
+
+    print("[Planner] map tasks sent")
+    ch.basic_ack(method.delivery_tag)
+
+
+# Existing planner event callback (unchanged except minor fixes)
 def planner_event_callback(ch, method, properties, body):
-    """
-    This consumes events from Task Manager (events.planner).
-    Events handled:
-      - map.task.done  -> marks chunk done (payload: main_task_id, task_id)
-      - map.phase.done -> (optional) TM may also send this, we use it as signal
-      - reduce.phase.done -> job finished
-      - worker.failed -> worker died, planner should requeue pending map tasks
-    """
     msg = json.loads(body)
     event = msg.get("event")
 
-    # 1) worker died -> requeue pending map tasks
     if event == "worker.failed":
         worker_id = msg.get("worker_id")
+        failed_task = msg.get("failed_task")
         print(f"[Planner] got worker.failed for worker={worker_id} — requeueing pending map tasks")
-        # requeue any pending chunk tasks across main_tasks
         total_requeued = 0
         for main_task_id, info in main_tasks.items():
             for chunk_key, status in list(info['chunk_status'].items()):
                 if status != 'done':
-                    # create new task_id and send
                     new_task_id = str(uuid.uuid4())
                     send_task(
                         ch,
@@ -143,17 +162,33 @@ def planner_event_callback(ch, method, properties, body):
                         bucket=BUCKET_NAME
                     )
                     info['task_map'][new_task_id] = chunk_key
-                    # keep chunk_status as pending (still pending until map.task.done arrives)
                     total_requeued += 1
+
+        if failed_task:
+            # Точная переотправка только упавшей задачи
+            new_task_id = str(uuid.uuid4())
+            send_task(
+                ch,
+                task_type=failed_task.get("type", "map"),
+                address=failed_task.get("address"),
+                main_task_id=failed_task.get("main_task_id"),
+                task_id=new_task_id
+            )
+            # Обновляем маппинг
+            main_task_id = failed_task.get("main_task_id")
+            if main_task_id in main_tasks:
+                main_tasks[main_task_id]['task_map'][new_task_id] = failed_task.get("address")
+                main_tasks[main_task_id]['chunk_status'][failed_task.get("address")] = 'pending'
+
+            print(f"[Planner] Precisely requeued failed task {new_task_id} -> {failed_task.get('address')}")
+
         print(f"[Planner] requeued {total_requeued} tasks due to worker failure")
         ch.basic_ack(method.delivery_tag)
         return
 
-    # 2) individual map task completed (from TM forwarding worker's map.done)
-    if event == "map.task.done" or event == "map.done":
+    if event in ("map.task.done", "map.done"):
         main_task_id = msg.get("main_task_id")
         task_id = msg.get("task_id")
-        # translate task_id -> chunk and mark done
         if main_task_id in main_tasks:
             mapping = main_tasks[main_task_id]['task_map']
             chunk = mapping.get(task_id)
@@ -161,28 +196,16 @@ def planner_event_callback(ch, method, properties, body):
                 main_tasks[main_task_id]['chunk_status'][chunk] = 'done'
                 print(f"[Planner] map task {task_id} done -> chunk {chunk} marked done")
             else:
-                # maybe this was a requeued task with a different id not tracked? try to find by value
-                # scan for mapping where value equals some chunk? (best-effort)
-                found = False
                 for tid, ck in list(mapping.items()):
                     if tid == task_id:
                         main_tasks[main_task_id]['chunk_status'][ck] = 'done'
-                        found = True
                         break
-                if not found:
-                    print(f"[Planner] map.task.done for unknown task_id {task_id} (ignoring)")
-        else:
-            print(f"[Planner] map.task.done for unknown main_task_id {main_task_id} (ignoring)")
-
         ch.basic_ack(method.delivery_tag)
         return
 
-    # 3) map phase fully completed signalled by TM
     if event == "map.phase.done":
         main_task_id = msg.get("main_task_id")
         print(f"[Planner] map phase completed for {main_task_id}")
-
-        # send reduce.expected via worker events (TM also might need it)
         ch.basic_publish(
             exchange='',
             routing_key=WORKER_EVENTS_QUEUE,
@@ -193,8 +216,6 @@ def planner_event_callback(ch, method, properties, body):
             }),
             properties=pika.BasicProperties(delivery_mode=2)
         )
-
-        # send reduce tasks
         for part in range(NUM_REDUCE_PARTS):
             send_task(
                 ch,
@@ -205,7 +226,6 @@ def planner_event_callback(ch, method, properties, body):
                 storage="minio",
                 bucket=BUCKET_NAME
             )
-
         ch.basic_ack(method.delivery_tag)
         return
 
@@ -214,17 +234,14 @@ def planner_event_callback(ch, method, properties, body):
         ch.basic_ack(method.delivery_tag)
         return
 
-    # unknown
     print(f"[Planner] unknown planner event: {event}")
     ch.basic_ack(method.delivery_tag)
 
 
-def start_planner_event_listener(channel):
-    channel.basic_consume(
-        queue=PLANNER_EVENTS_QUEUE,
-        on_message_callback=planner_event_callback,
-        auto_ack=False
-    )
+def start_listeners(channel):
+    channel.basic_consume(queue=PLANNER_EVENTS_QUEUE, on_message_callback=planner_event_callback, auto_ack=False)
+    channel.basic_consume(queue=DATA_MANAGER_RESPONSE_QUEUE, on_message_callback=data_manager_response_callback, auto_ack=False)
+    print("[Planner] Waiting for events and DataManager responses...")
     channel.start_consuming()
 
 
@@ -241,62 +258,31 @@ def main():
     conn = pika.BlockingConnection(params)
     ch = conn.channel()
 
-    # queues
+    # Declare all queues
     ch.queue_declare(queue=TASKS_QUEUE, durable=True)
     ch.queue_declare(queue=WORKER_EVENTS_QUEUE, durable=True)
     ch.queue_declare(queue=PLANNER_EVENTS_QUEUE, durable=True)
+    ch.queue_declare(queue=DATA_MANAGER_QUEUE, durable=True)
+    ch.queue_declare(queue=DATA_MANAGER_RESPONSE_QUEUE, durable=True)
 
-    MAIN_TASK_ID = "1"
-    INPUT_FILE = r"C:\ovr_pr\large_test_words.txt"
+    MAIN_TASK_ID = str(uuid.uuid4())[:8]
+    INPUT_FILE_LOCAL = r"C:\ovr_pr\large_test_words.txt"
+    INPUT_KEY = f"{MAIN_TASK_ID}/input.txt"  # key in MinIO
 
-    print("[Planner] splitting input file...")
-    files = split_and_upload_txt(
-        INPUT_FILE,
-        lines_per_file=1_000_000,
-        bucket=BUCKET_NAME,
+    print("[Planner] Uploading full input file to MinIO...")
+    upload_file(INPUT_FILE_LOCAL, BUCKET_NAME, INPUT_KEY)
+    print(f"[Planner] Uploaded input file as {INPUT_KEY}")
+
+    # Request split from DataManager
+    request_split_from_data_manager(
+        ch,
+        input_key=INPUT_KEY,
+        main_task_id=MAIN_TASK_ID,
         prefix=f"{MAIN_TASK_ID}/"
     )
 
-    print(f"[Planner] uploaded {len(files)} chunks")
-
-    # initialize in-memory state
-    main_tasks[MAIN_TASK_ID] = {
-        "chunks": list(files),
-        "chunk_status": {k: 'pending' for k in files},
-        "task_map": {}  # task_id -> chunk_key
-    }
-
-    ch.basic_publish(
-        exchange='',
-        routing_key=WORKER_EVENTS_QUEUE,
-        body=json.dumps({
-            "event": "map.expected",
-            "main_task_id": MAIN_TASK_ID,
-            "count": len(files)
-        }),
-        properties=pika.BasicProperties(delivery_mode=2)
-    )
-
-    # send map tasks
-    for key in files:
-        task_id = str(uuid.uuid4())
-        # store mapping before send
-        main_tasks[MAIN_TASK_ID]['task_map'][task_id] = key
-        send_task(
-            ch,
-            task_type="map",
-            address=key,
-            main_task_id=MAIN_TASK_ID,
-            task_id=task_id,
-            storage="minio",
-            bucket=BUCKET_NAME
-        )
-
-    print("[Planner] map tasks sent")
-
-    # listen events from Task Manager
-    print("[Planner] waiting for Task Manager events...")
-    start_planner_event_listener(ch)
+    # Start listening for both TM events and DataManager responses
+    start_listeners(ch)
 
 
 if __name__ == "__main__":

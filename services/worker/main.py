@@ -3,7 +3,6 @@ from libs.worker.loaders import txtDataSource, jsonDataSink, jsonDataSource
 
 from libs.storage_client.client import download_file, upload_file, list_objects
 
-
 import shutil
 import os
 import pika
@@ -12,22 +11,18 @@ import uuid
 import threading
 import time
 
-
-
 QUEUE_NAME = 'tasks'
 MAP_DONE_QUEUE = "map.done"
 
 WORKER_ID = str(uuid.uuid4())[:8]
-
 
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
 RABBIT_PORT = 7672
 
-# numsber of retries for failed tasks
+# number of retries for failed tasks
 MAX_RETRIES = 3
-
 
 def heartbeat_loop():
     credentials = pika.PlainCredentials(RABBIT_LOGIN, RABBIT_PASS)
@@ -38,24 +33,41 @@ def heartbeat_loop():
         credentials=credentials
     )
 
-    conn = pika.BlockingConnection(params)
-    ch = conn.channel()
-
     while True:
-        msg = {
-            "event": "heartbeat",
-            "worker_id": WORKER_ID,
-            "ts": time.time()
-        }
-        ch.basic_publish(
-            exchange='',
-            routing_key='events.worker',
-            body=json.dumps(msg),
-            properties=pika.BasicProperties(delivery_mode=2)
-        )
+        try:
+            conn = pika.BlockingConnection(params)
+            ch = conn.channel()
+
+            # Get current task from the thread (if any)
+            current_task = getattr(threading.current_thread(), "current_task", None)
+
+            msg = {
+                "event": "heartbeat",
+                "worker_id": WORKER_ID,
+                "ts": time.time()
+            }
+
+            if current_task:
+                msg["current_task"] = {
+                    "task_id": current_task.get("task_id"),
+                    "main_task_id": current_task.get("main_task_id"),
+                    "type": current_task.get("type"),
+                    "address": current_task.get("address")
+                }
+
+            ch.basic_publish(
+                exchange='',
+                routing_key='events.worker',
+                body=json.dumps(msg),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+
+            ch.close()
+            conn.close()
+        except Exception as e:
+            print(f"[{WORKER_ID}] Heartbeat failed: {e}. Retrying in 10s...")
+
         time.sleep(10)
-
-
 
 def download_part_files(main_task_id: str, part_num: int, bucket: str = "mapreduce") -> str:
     """
@@ -141,6 +153,19 @@ def callback(ch, method, properties, body):
         return
 
     print(f"[{WORKER_ID}] picked {task.get('task_id')}")
+
+    threading.current_thread().current_task = task
+
+    ch.basic_publish(
+        exchange='',
+        routing_key='events.worker',
+        body=json.dumps({
+            "event": "task.started",
+            "worker_id": WORKER_ID,
+            "task": task
+        }),
+        properties=pika.BasicProperties(delivery_mode=2)
+    )
 
     SPILL_FILES_DIR = rf"storage\{task.get('main_task_id')}\{task.get('task_id')}\spill_files"
     SHUFFLE_FILES_DIR = rf"storage\{task.get('main_task_id')}\{task.get('task_id')}\shuffle_files"
@@ -323,6 +348,21 @@ def callback(ch, method, properties, body):
             )
             ch.basic_ack(delivery_tag=method.delivery_tag)
             print(f"[{WORKER_ID}] requeued task (attempt {attempts+1})")
+
+    finally:
+        if hasattr(threading.current_thread(), "current_task"):
+            delattr(threading.current_thread(), "current_task")
+
+        ch.basic_publish(
+            exchange='',
+            routing_key='events.worker',
+            body=json.dumps({
+                "event": "task.done",
+                "worker_id": WORKER_ID,
+                "task_id": task.get("task_id")
+            }),
+            properties=pika.BasicProperties(delivery_mode=2)
+        )
 
 
 def main():
