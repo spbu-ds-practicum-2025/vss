@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Processing Web Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        h1, h2 { color: #333; }
+        section {
+            margin-bottom: 30px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        input[type="file"], input[type="text"] {
+            padding: 10px;
+            font-size: 16px;
+            width: 100%;
+            box-sizing: border-box;
+            margin-bottom: 10px;
+        }
+        button {
+            padding: 10px 15px;
+            font-size: 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover { background-color: #0056b3; }
+        .task-list {
+            margin-top: 20px;
+        }
+        .task-item {
+            padding: 15px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            background-color: #f8f9fa;
+        }
+        .task-item strong { display: block; margin-bottom: 5px; }
+        .status-processing { color: #d9534f; font-weight: bold; }
+        .status-completed { color: #5cb85c; font-weight: bold; }
+        .status-error { color: #d9534f; font-weight: bold; }
+        .download-btn {
+            background-color: #5cb85c;
+            margin-top: 10px;
+            display: inline-block;
+            padding: 8px 16px;
+            text-decoration: none;
+            border-radius: 4px;
+        }
+        .download-btn:hover { background-color: #4cae4c; }
+        #output { margin-top: 10px; padding: 10px; background: #eef; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <h1>Обработка датасетов</h1>
+
+    <section>
+        <h2>Загрузить новый файл для обработки</h2>
+        <input type="file" id="file-input">
+        <button id="upload-btn">Загрузить и начать обработку</button>
+        <div id="upload-output"></div>
+    </section>
+
+    <section>
+        <h2>Обработать файл, уже лежащий в хранилище</h2>
+        <input type="text" id="file-name-input" placeholder="Например: datasets/mydata.txt">
+        <button id="upload-by-name-btn">Начать обработку по имени</button>
+        <div id="upload-by-name-output"></div>
+    </section>
+
+    <section>
+        <h2>Мои задачи</h2>
+        <p>Все ваши запущенные задачи сохраняются в браузере.</p>
+        <div id="task-list" class="task-list">
+            <p>Пока задач нет. Загрузите файл, и они появятся здесь.</p>
+        </div>
+        <button id="refresh-all-btn">Обновить статус всех задач</button>
+    </section>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8000'; // Измени, если сервер на другом порту
+
+        // Загружаем задачи из localStorage
+        let tasks = JSON.parse(localStorage.getItem('processing_tasks') || '[]');
+
+        function saveTasks() {
+            localStorage.setItem('processing_tasks', JSON.stringify(tasks));
+        }
+
+        function renderTaskList() {
+            const container = document.getElementById('task-list');
+            if (tasks.length === 0) {
+                container.innerHTML = '<p>Пока задач нет. Загрузите файл, и они появятся здесь.</p>';
+                return;
+            }
+
+            container.innerHTML = '';
+            tasks.forEach(task => {
+                const div = document.createElement('div');
+                div.className = 'task-item';
+                div.innerHTML = `
+                    <strong>Файл: ${task.filename || 'Неизвестно'}</strong>
+                    <small>task_id: ${task.task_id}</small><br>
+                    <span class="status-${task.status}">${getStatusText(task.status)}</span>
+                    <div id="actions-${task.task_id}"></div>
+                `;
+                container.appendChild(div);
+
+                // Если статус не completed — добавляем кнопку проверки
+                if (task.status !== 'completed' && task.status !== 'error') {
+                    const checkBtn = document.createElement('button');
+                    checkBtn.textContent = 'Проверить статус';
+                    checkBtn.onclick = () => checkStatus(task.task_id);
+                    document.getElementById(`actions-${task.task_id}`).appendChild(checkBtn);
+                }
+
+                // Если завершено — кнопка скачивания
+                if (task.status === 'completed') {
+                    const downloadLink = document.createElement('a');
+                    downloadLink.href = `${API_BASE_URL}/files/status?task_id=${task.task_id}&download=true`;
+                    downloadLink.className = 'download-btn';
+                    downloadLink.textContent = 'Скачать результат';
+                    downloadLink.download = ''; // Подсказка браузеру скачать файл
+                    document.getElementById(`actions-${task.task_id}`).appendChild(downloadLink);
+                }
+            });
+        }
+
+        function getStatusText(status) {
+            switch(status) {
+                case 'processing': return 'Идёт обработка...';
+                case 'completed': return 'Обработка завершена';
+                case 'error': return 'Ошибка обработки';
+                default: return 'Неизвестно';
+            }
+        }
+
+        async function addTask(task_id, filename) {
+            tasks.push({
+                task_id,
+                filename,
+                status: 'processing'
+            });
+            saveTasks();
+            renderTaskList();
+        }
+
+        async function checkStatus(task_id) {
+            const task = tasks.find(t => t.task_id === task_id);
+            if (!task) return;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/files/status?task_id=${task_id}&download=false`);
+                const data = await response.json();
+
+                if (data.status === 'completed') {
+                    task.status = 'completed';
+                } else if (data.status === 'processing') {
+                    task.status = 'processing';
+                } else {
+                    task.status = 'error';
+                }
+
+                saveTasks();
+                renderTaskList();
+            } catch (err) {
+                alert('Ошибка связи с сервером: ' + err.message);
+            }
+        }
+
+        // Загрузка файла
+        document.getElementById('upload-btn').addEventListener('click', async () => {
+            const fileInput = document.getElementById('file-input');
+            const output = document.getElementById('upload-output');
+            if (!fileInput.files.length) {
+                output.textContent = 'Выберите файл!';
+                return;
+            }
+
+            output.textContent = 'Загрузка...';
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/files/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const text = await response.text();
+                output.textContent = text;
+
+                // Извлекаем task_id из ответа вида "File uploaded with task_id: abc123"
+                const match = text.match(/task_id: ([a-f0-9-]+)/);
+                if (match) {
+                    await addTask(match[1], fileInput.files[0].name);
+                }
+            } catch (err) {
+                output.textContent = 'Ошибка: ' + err.message;
+            }
+        });
+
+        // Загрузка по имени
+        document.getElementById('upload-by-name-btn').addEventListener('click', async () => {
+            const nameInput = document.getElementById('file-name-input');
+            const output = document.getElementById('upload-by-name-output');
+            const name = nameInput.value.trim();
+            if (!name) {
+                output.textContent = 'Введите имя файла!';
+                return;
+            }
+
+            output.textContent = 'Запуск обработки...';
+            try {
+                const response = await fetch(`${API_BASE_URL}/files/upload_by_name?name=${encodeURIComponent(name)}`, {
+                    method: 'POST'
+                });
+                const text = await response.text();
+                output.textContent = text;
+
+                const match = text.match(/task_id: ([a-f0-9-]+)/);
+                if (match) {
+                    const filename = name.split('/').pop();
+                    await addTask(match[1], filename);
+                }
+            } catch (err) {
+                output.textContent = 'Ошибка: ' + err.message;
+            }
+        });
+
+        // Обновить все статусы
+        document.getElementById('refresh-all-btn').addEventListener('click', async () => {
+            for (const task of tasks) {
+                if (task.status !== 'completed' && task.status !== 'error') {
+                    await checkStatus(task.task_id);
+                }
+            }
+        });
+
+        // Первоначальный рендер списка
+        renderTaskList();
+    </script>
+</body>
+</html>
