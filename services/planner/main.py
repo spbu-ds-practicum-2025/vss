@@ -1,3 +1,4 @@
+# planner.py
 import pika
 import json
 import uuid
@@ -138,6 +139,7 @@ def planner_event_callback(ch, method, properties, body):
 
     if event == "worker.failed":
         worker_id = msg.get("worker_id")
+        failed_task = msg.get("failed_task")
         print(f"[Planner] got worker.failed for worker={worker_id} — requeueing pending map tasks")
         total_requeued = 0
         for main_task_id, info in main_tasks.items():
@@ -155,6 +157,25 @@ def planner_event_callback(ch, method, properties, body):
                     )
                     info['task_map'][new_task_id] = chunk_key
                     total_requeued += 1
+
+        if failed_task:
+            # Точная переотправка только упавшей задачи
+            new_task_id = str(uuid.uuid4())
+            send_task(
+                ch,
+                task_type=failed_task.get("type", "map"),
+                address=failed_task.get("address"),
+                main_task_id=failed_task.get("main_task_id"),
+                task_id=new_task_id
+            )
+            # Обновляем маппинг
+            main_task_id = failed_task.get("main_task_id")
+            if main_task_id in main_tasks:
+                main_tasks[main_task_id]['task_map'][new_task_id] = failed_task.get("address")
+                main_tasks[main_task_id]['chunk_status'][failed_task.get("address")] = 'pending'
+
+            print(f"[Planner] Precisely requeued failed task {new_task_id} -> {failed_task.get('address')}")
+
         print(f"[Planner] requeued {total_requeued} tasks due to worker failure")
         ch.basic_ack(method.delivery_tag)
         return
