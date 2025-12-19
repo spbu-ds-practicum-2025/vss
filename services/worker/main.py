@@ -15,7 +15,7 @@ WORKER_ID = "1"
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
-RABBIT_PORT = 5672
+RABBIT_PORT = 7672
 
 # numsber of retries for failed tasks
 MAX_RETRIES = 3

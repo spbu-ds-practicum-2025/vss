@@ -4,7 +4,7 @@ import uuid
 import time
 import os
 
-from libs.storage_client.storage_client import upload_file
+from libs.storage_client.client import upload_file
 
 
 QUEUE_NAME = 'tasks'
@@ -12,7 +12,7 @@ QUEUE_NAME = 'tasks'
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
-RABBIT_PORT = 5672
+RABBIT_PORT = 7672
 
 
 def split_and_upload_txt(input_file: str, lines_per_file: int = 1_000_000, bucket="mapreduce", prefix="chunks/") -> list:
