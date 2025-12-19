@@ -4,8 +4,14 @@ import json
 import uuid
 import time
 import os
+import queue
 
 from libs.storage_client.client import upload_file
+
+
+QUEUE_NAME_1 = 'tasks'
+QUEUE_NAME_2 = 'user_requests'
+
 
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
@@ -223,6 +229,7 @@ def start_planner_event_listener(channel):
 
 
 def main():
+    print(f"[PLANNER] started")
     credentials = pika.PlainCredentials(RABBIT_LOGIN, RABBIT_PASS)
     params = pika.ConnectionParameters(
         host=RABBIT_HOST,
