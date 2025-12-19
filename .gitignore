@@ -5,4 +5,3 @@ services/Worker/storage/
 services/result.txt
 *.DS_Store
 services/data
-services/Message_broker

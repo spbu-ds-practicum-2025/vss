@@ -8,17 +8,54 @@ import shutil
 import os
 import pika
 import json
+import uuid
+import threading
+import time
+
+
 
 QUEUE_NAME = 'tasks'
-WORKER_ID = "1"
+MAP_DONE_QUEUE = "map.done"
+
+WORKER_ID = str(uuid.uuid4())[:8]
+
 
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
-RABBIT_PORT = 5672
+RABBIT_PORT = 7672
 
 # numsber of retries for failed tasks
 MAX_RETRIES = 3
+
+
+def heartbeat_loop():
+    credentials = pika.PlainCredentials(RABBIT_LOGIN, RABBIT_PASS)
+    params = pika.ConnectionParameters(
+        host=RABBIT_HOST,
+        port=RABBIT_PORT,
+        virtual_host='/',
+        credentials=credentials
+    )
+
+    conn = pika.BlockingConnection(params)
+    ch = conn.channel()
+
+    while True:
+        msg = {
+            "event": "heartbeat",
+            "worker_id": WORKER_ID,
+            "ts": time.time()
+        }
+        ch.basic_publish(
+            exchange='',
+            routing_key='events.worker',
+            body=json.dumps(msg),
+            properties=pika.BasicProperties(delivery_mode=2)
+        )
+        time.sleep(10)
+
+
 
 def download_part_files(main_task_id: str, part_num: int, bucket: str = "mapreduce") -> str:
     """
@@ -113,6 +150,7 @@ def callback(ch, method, properties, body):
     def process_map_task(file_address: str):
 
         # mapping phase
+        time.sleep(10)
         mapper = WordCountMapper()
         data_spill_saver = jsonDataSink(SPILL_FILES_DIR, mode="jsonl")
         data_sorce = txtDataSource()
@@ -223,6 +261,18 @@ def callback(ch, method, properties, body):
                             print(f"[{WORKER_ID}] warning: failed to remove {local_task_dir}: {e}")
                     else:
                         print(f"[{WORKER_ID}] nothing to cleanup at {local_task_dir}")
+        
+            ch.basic_publish(
+                exchange='',
+                routing_key='events.worker',
+                body=json.dumps({
+                    "event": "map.done",
+                    "main_task_id": main_task_id,
+                    "task_id": worker_task_id
+                }),
+                properties=pika.BasicProperties(delivery_mode=2)
+)
+
 
 
         elif task.get('type') == 'reduce':
@@ -233,6 +283,18 @@ def callback(ch, method, properties, body):
             upload_file(local_reduce_file, bucket="mapreduce", key=s3_key)
 
             print(f"[{WORKER_ID}] completed {task.get('task_id')} type=reduce part_id={task.get('part_id')}")
+
+            ch.basic_publish(
+            exchange='',
+            routing_key='events.worker',
+            body=json.dumps({
+                "event": "reduce.done",
+                "main_task_id": main_task_id,
+                "part": task.get("address")
+            }),
+            properties=pika.BasicProperties(delivery_mode=2)
+            )
+
 
     except Exception as e:
         print(f"[{WORKER_ID}] error processing {task.get('task_id')}: {e}")
@@ -276,6 +338,14 @@ def main():
 
     print(f"[{WORKER_ID}] waiting for tasks. To exit press CTRL+C")
     try:
+        heartbeat = threading.Thread(
+        target=heartbeat_loop,
+        daemon=True
+        )
+        heartbeat.start()
+
+
+
         ch.start_consuming()
     except KeyboardInterrupt:
         ch.stop_consuming()
@@ -285,5 +355,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
