@@ -4,7 +4,7 @@ import uuid
 import time
 import os
 
-from storage_client import upload_file
+from libs.storage_client.storage_client import upload_file
 
 
 QUEUE_NAME = 'tasks'
@@ -13,7 +13,6 @@ RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
 RABBIT_HOST = 'localhost'
 RABBIT_PORT = 5672
-
 
 
 def split_and_upload_txt(input_file: str, lines_per_file: int = 1_000_000, bucket="mapreduce", prefix="chunks/") -> list:
@@ -79,7 +78,7 @@ def main():
     ch.queue_declare(queue=QUEUE_NAME, durable=True)
 
     MAIN_TASK_ID = '1'
-    INPUT_FILE = r"C:\ovr_pr\large_test_words.txt"
+    INPUT_FILE = r"large_test_words.txt"
     BUCKET_NAME = "mapreduce"
 
     files = split_and_upload_txt(INPUT_FILE, lines_per_file=1_000_000, bucket=BUCKET_NAME, prefix=f"{MAIN_TASK_ID}/")
