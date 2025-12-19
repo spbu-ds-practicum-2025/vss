@@ -44,6 +44,27 @@ def upload_file(
     local_path: str,
     bucket: str,
     project_name: str,
+    key: str,
+) -> str:
+
+    s3 = get_s3_client()
+
+    if filename is None:
+        filename = Path(local_path).name
+
+    path = f'{project_name}/{key}'
+
+    # Локальные директории создаём на всякий случай (хотя для загрузки не обязательно)
+    # os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+
+    s3.upload_file(local_path, bucket, key)
+
+    return key  # удобно возвращать, чтобы потом можно было использовать
+
+def upload_process_file(
+    local_path: str,
+    bucket: str,
+    project_name: str,
     filename: Optional[str] = None,
 ) -> str:
     """
