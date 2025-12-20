@@ -70,34 +70,21 @@ def heartbeat_loop():
         time.sleep(10)
 
 def download_part_files(main_task_id: str, part_num: int, bucket: str = "mapreduce") -> str:
-    """
-    Download all shuffle part files for a specific part number from S3 into local storage.
-
-    Args:
-        main_task_id (str): ID of the whole MapReduce job.
-        part_num (int): Partition number (the "N" in part_N).
-        bucket (str): S3 bucket name.
-
-    Returns:
-        str: Path to the local directory containing downloaded part files.
-    """
-
-    # S3 prefix: MAIN_TASK_ID/shuffle/part_{n}/
     prefix = f"{main_task_id}/parts/part_{part_num}/"
 
-    # Local directory where files will be stored
     local_dir = os.path.join("storage", main_task_id, "parts", f"part_{part_num}")
     os.makedirs(local_dir, exist_ok=True)
 
-    # List all objects in this prefix
     objects = list_objects(bucket, prefix)
-    if not objects:
-        raise FileNotFoundError(f"No files found in S3 path: {prefix}")
 
-    # Download all of them
+    # ИСПРАВЛЕНИЕ: если нет файлов — просто возвращаем пустую директорию
+    if not objects:
+        print(f"[{WORKER_ID}] No files for part_{part_num} — empty partition, skipping download")
+        return local_dir  # всё равно возвращаем директорию, reduce обработает пустую
+
     for obj_key in objects:
         local_path = os.path.join(local_dir, os.path.basename(obj_key))
-        download_file(bucket, obj_key, local_path)
+        download_file(bucket=bucket, key=obj_key, local_path=local_path, project_name=None)
 
     return local_dir
 
@@ -105,33 +92,33 @@ def download_part_files(main_task_id: str, part_num: int, bucket: str = "mapredu
 def download_input_file(task: dict) -> str:
     """
     Ensure local directory exists, download from MinIO if requested and return local path.
-    Raises informative exceptions on bad input.
     """
     task_id = task.get('task_id') or 'unknown'
     main_task_id = task.get('main_task_id') or 'unknown'
     local_dir = os.path.join("storage", main_task_id, task_id)
     local_path = os.path.join(local_dir, "input_file.txt")
 
-    # ensure storage dir exists
     os.makedirs(local_dir, exist_ok=True)
 
-    storage_type = task.get('storage')  # <- note: правильное поле 'storage'
+    storage_type = task.get('storage')
     if storage_type is None:
         raise ValueError("Task missing 'storage' field (expected 'minio' or 'local').")
 
     if storage_type == 'minio':
-        # require address (S3 key) and optionally bucket
         s3_key = task.get('address')
         if not s3_key:
             raise ValueError("Task missing 'address' (S3 object key).")
-        bucket = task.get('bucket', "mapreduce")  # fallback default bucket
-        # download into existing folder
-        download_file(bucket=bucket, key=s3_key, local_path=local_path)
-        # now return the local filesystem path for downstream processors
+        bucket = task.get('bucket', "mapreduce")
+        # Добавлен project_name=None
+        download_file(
+            bucket=bucket,
+            key=s3_key,
+            local_path=local_path,
+            project_name=None
+        )
         return local_path
 
     elif storage_type == 'local':
-        # address is a local path already: just return it (or copy if you need)
         addr = task.get('address')
         if not addr:
             raise ValueError("Task missing 'address' for local storage.")
@@ -144,7 +131,6 @@ def download_input_file(task: dict) -> str:
 
 
 def callback(ch, method, properties, body):
-    # if message is not valid JSON — ack and skip
     try:
         task = json.loads(body)
     except Exception:
@@ -170,11 +156,8 @@ def callback(ch, method, properties, body):
     SPILL_FILES_DIR = rf"storage\{task.get('main_task_id')}\{task.get('task_id')}\spill_files"
     SHUFFLE_FILES_DIR = rf"storage\{task.get('main_task_id')}\{task.get('task_id')}\shuffle_files"
     REDUCE_OUTPUT_DIR = rf"storage\{task.get('main_task_id')}\{task.get('task_id')}\reduce_output"
-            
 
     def process_map_task(file_address: str):
-
-        # mapping phase
         time.sleep(10)
         mapper = WordCountMapper()
         data_spill_saver = jsonDataSink(SPILL_FILES_DIR, mode="jsonl")
@@ -184,8 +167,6 @@ def callback(ch, method, properties, body):
         map_executor.process(filepath=file_address)
 
         print("Mapping phase completed. Starting shuffling phase...")
-
-        # shuffling phase
 
         shuffler = WordCountShuffler(num_parts=4, flush_threshold=2_000)
         shuffle_executor = ShuffleExecutor(shuffler, 
@@ -197,7 +178,6 @@ def callback(ch, method, properties, body):
 
 
     def process_reduce_task(part_num: int):
-        # reducing phase
         print("Starting reducing phase...")
         reducer = WordCountReducer()
         part_dir = download_part_files(task.get('main_task_id'), part_num, bucket=task.get('bucket', 'mapreduce'))
@@ -212,25 +192,20 @@ def callback(ch, method, properties, body):
         print("Reducing phase completed.")
         print(f"Reduce output stored in: {REDUCE_OUTPUT_DIR}")
 
-
-
     headers = {}
     if properties is not None:
-        # properties.headers может быть None или dict
         headers = properties.headers or {}
     attempts = int(headers.get('x-attempts', 0))
 
     main_task_id = task.get('main_task_id')
     worker_task_id = task.get('task_id')
 
-
     try:
-
         if task.get('type') == 'map':
             input_file = download_input_file(task)
             process_map_task(input_file)
             ch.basic_ack(delivery_tag=method.delivery_tag) 
-            # --- upload shuffle files to S3 (simple, robust) ---
+
             if not main_task_id:
                 raise ValueError("Missing main_task_id in task")
 
@@ -250,19 +225,22 @@ def callback(ch, method, properties, body):
                     if not os.path.isfile(local_path):
                         continue
 
-                    # try to detect part index from filename, fallback to 'unknown'
                     m = re.search(r'part[_\-]?(\d+)', filename, flags=re.IGNORECASE)
                     if m:
                         part_idx = int(m.group(1))
                     else:
-                        # try a leading number like "0_" or "0."
                         m2 = re.match(r'^(\d+)[_\.\-]', filename)
                         part_idx = int(m2.group(1)) if m2 else "unknown"
 
                     s3_key = f"{main_task_id}/parts/part_{part_idx}/{worker_task_id}_{filename}"
                     try:
-                        # upload_file(local_path, bucket, key)
-                        upload_file(local_path, bucket="mapreduce", key=s3_key)
+                        # ИСПРАВЛЕННЫЙ ВЫЗОВ
+                        upload_file(
+                            local_path=local_path,
+                            bucket="mapreduce",
+                            project_name=None,  # важно!
+                            key=s3_key
+                        )
                         uploaded += 1
                         print(f"[{WORKER_ID}] uploaded {filename} -> {s3_key}")
                     except Exception as e:
@@ -270,13 +248,11 @@ def callback(ch, method, properties, body):
                         print(f"[{WORKER_ID}] ERROR uploading {filename}: {e}")
 
                 if upload_failures:
-                    # don't remove anything if uploads weren't all successful
                     print(f"[{WORKER_ID}] upload finished with {len(upload_failures)} failures: {upload_failures}")
                     raise RuntimeError(f"Upload errors: {len(upload_failures)} files failed")
                 else:
                     print(f"[{WORKER_ID}] Upload completed. {uploaded} files uploaded.")
 
-                    # cleanup local task folder (safe remove)
                     local_task_dir = os.path.join("storage", main_task_id, worker_task_id)
                     if os.path.isdir(local_task_dir):
                         try:
@@ -284,9 +260,7 @@ def callback(ch, method, properties, body):
                             print(f"[{WORKER_ID}] cleaned up local files: {local_task_dir}")
                         except Exception as e:
                             print(f"[{WORKER_ID}] warning: failed to remove {local_task_dir}: {e}")
-                    else:
-                        print(f"[{WORKER_ID}] nothing to cleanup at {local_task_dir}")
-        
+
             ch.basic_publish(
                 exchange='',
                 routing_key='events.worker',
@@ -296,37 +270,38 @@ def callback(ch, method, properties, body):
                     "task_id": worker_task_id
                 }),
                 properties=pika.BasicProperties(delivery_mode=2)
-)
-
-
+            )
 
         elif task.get('type') == 'reduce':
             process_reduce_task(int(task.get('address')))
             ch.basic_ack(delivery_tag=method.delivery_tag)
             s3_key = f"{main_task_id}/reduce_output/reduced_part_{task.get('address')}.jsonl"
             local_reduce_file = os.path.join(REDUCE_OUTPUT_DIR, f"reduced_{task.get('address')}.jsonl")
-            upload_file(local_reduce_file, bucket="mapreduce", key=s3_key)
-
-            print(f"[{WORKER_ID}] completed {task.get('task_id')} type=reduce part_id={task.get('part_id')}")
-
-            ch.basic_publish(
-            exchange='',
-            routing_key='events.worker',
-            body=json.dumps({
-                "event": "reduce.done",
-                "main_task_id": main_task_id,
-                "part": task.get("address")
-            }),
-            properties=pika.BasicProperties(delivery_mode=2)
+            # ИСПРАВЛЕННЫЙ ВЫЗОВ
+            upload_file(
+                local_path=local_reduce_file,
+                bucket="mapreduce",
+                project_name=None,
+                key=s3_key
             )
 
+            print(f"[{WORKER_ID}] completed {task.get('task_id')} type=reduce")
+
+            ch.basic_publish(
+                exchange='',
+                routing_key='events.worker',
+                body=json.dumps({
+                    "event": "reduce.done",
+                    "main_task_id": main_task_id,
+                    "part": task.get("address")
+                }),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
 
     except Exception as e:
         print(f"[{WORKER_ID}] error processing {task.get('task_id')}: {e}")
 
-        # retry logic
         if attempts + 1 >= MAX_RETRIES:
-            # отправляем в dead-letter, передав attempts для истории
             headers['x-attempts'] = attempts + 1
             ch.basic_publish(
                 exchange='',
@@ -336,9 +311,7 @@ def callback(ch, method, properties, body):
             )
             ch.basic_ack(delivery_tag=method.delivery_tag)
             print(f"[{WORKER_ID}] sent to dead queue: attempts={attempts+1}")
-
         else:
-            # републикуем задачу с увеличенным counter (и ack текущую)
             headers['x-attempts'] = attempts + 1
             ch.basic_publish(
                 exchange='',
@@ -378,13 +351,8 @@ def main():
 
     print(f"[{WORKER_ID}] waiting for tasks. To exit press CTRL+C")
     try:
-        heartbeat = threading.Thread(
-        target=heartbeat_loop,
-        daemon=True
-        )
+        heartbeat = threading.Thread(target=heartbeat_loop, daemon=True)
         heartbeat.start()
-
-
 
         ch.start_consuming()
     except KeyboardInterrupt:

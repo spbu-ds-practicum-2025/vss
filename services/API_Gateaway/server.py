@@ -380,3 +380,28 @@ async def get_status_with_auto_download(
             }
         )
 
+import threading
+
+def listen_for_completion():
+    credentials = pika.PlainCredentials('admin', 'password')
+    params = pika.ConnectionParameters(host='localhost', port=7672, virtual_host='/', credentials=credentials)
+    conn = pika.BlockingConnection(params)
+    ch = conn.channel()
+    ch.queue_declare(queue='user_requests', durable=True)
+
+    def callback(ch, method, properties, body):
+        msg = json.loads(body)
+        if msg.get("status") == "completed":
+            task_id = msg["task_id"]
+            result_key = msg["result_key"]
+            print(f"[API Gateway] Received completion notification!")
+            print(f"Task {task_id} completed. Result available at: {result_key}")
+            # Здесь можно обновить tasks[task_id].status = "completed" и т.д.
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+
+    ch.basic_consume(queue='user_requests', on_message_callback=callback, auto_ack=False)
+    print("[API Gateway] Listening for job completion...")
+    ch.start_consuming()
+
+if __name__ == "__main__":
+    threading.Thread(target=listen_for_completion, daemon=True).start()

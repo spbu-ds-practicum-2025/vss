@@ -5,6 +5,7 @@ import time
 import threading
 import redis
 from datetime import datetime, timedelta
+from collections import defaultdict
 
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
@@ -23,6 +24,10 @@ PLANNER_EVENTS_QUEUE = 'events.planner'
 HEARTBEAT_TIMEOUT = 30
 HEARTBEAT_CHECK_INTERVAL = 10
 DEAD_WORKER_TTL = 86400 * 7  # 7 дней храним мёртвых воркеров
+
+reduce_expected = defaultdict(int)
+reduce_received = defaultdict(int)
+reduce_phase_done_sent = set()
 
 # Redis connection pool
 redis_pool = redis.ConnectionPool(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, password=REDIS_PASSWORD)
@@ -166,6 +171,32 @@ def handle_worker_event(ch, method, properties, body):
                 r.delete(job_key(mtid))
                 r.srem(phase_done_set(), mtid)
                 print(f"[TM] Cleaned up job metadata for {mtid}")
+                
+    elif ev == "reduce.expected":
+        mtid = msg.get("main_task_id")
+        cnt = int(msg.get("count", 0))
+        reduce_expected[mtid] = cnt
+        reduce_received[mtid] = 0
+        print(f"[TM] reduce.expected: {mtid} -> {cnt}")
+
+    elif ev == "reduce.done":
+        mtid = msg.get("main_task_id")
+        if mtid:
+            reduce_received[mtid] += 1
+            print(f"[TM] reduce.done received for {mtid}: {reduce_received[mtid]}/{reduce_expected.get(mtid, '?')}")
+
+            if (reduce_expected.get(mtid, 0) > 0
+                    and reduce_received[mtid] >= reduce_expected[mtid]
+                    and mtid not in reduce_phase_done_sent):
+                notify = {"event": "reduce.phase.done", "main_task_id": mtid}
+                ch.basic_publish(
+                    exchange='',
+                    routing_key=PLANNER_EVENTS_QUEUE,
+                    body=json.dumps(notify),
+                    properties=pika.BasicProperties(delivery_mode=2)
+                )
+                reduce_phase_done_sent.add(mtid)
+                print(f"[TM] published reduce.phase.done for {mtid}")
 
     ch.basic_ack(method.delivery_tag)
 
