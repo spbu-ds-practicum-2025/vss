@@ -46,20 +46,25 @@ def upload_file(
     project_name: str,
     key: str,
 ) -> str:
-
+    """
+    Загружает файл по полному ключу key.
+    project_name игнорируется, так как key уже полный (для совместимости с новым API).
+    """
     s3 = get_s3_client()
 
-    if filename is None:
-        filename = Path(local_path).name
+    # Если key не задан — берём имя файла из local_path
+    if not key:
+        key = Path(local_path).name
 
-    path = f'{project_name}/{key}'
+    # Если project_name указан — добавляем его как префикс (для старой совместимости)
+    if project_name:
+        project_name = project_name.strip("/")
+        key = f"{project_name}/{key.lstrip('/')}"
 
-    # Локальные директории создаём на всякий случай (хотя для загрузки не обязательно)
-    # os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
-
+    # Загружаем
     s3.upload_file(local_path, bucket, key)
 
-    return key  # удобно возвращать, чтобы потом можно было использовать
+    return key
 
 def upload_process_file(
     local_path: str,

@@ -2,8 +2,10 @@ import pika
 import json
 import uuid
 import os
+import shutil
 
-from libs.storage_client.client import upload_file, download_file
+from libs.storage_client.client import upload_file, download_file, list_objects
+from libs.worker.loaders import jsonDataSource, jsonDataSink
 from libs.worker.loaders import DataSource, DataSink
 
 RABBIT_PASS = 'password'
@@ -26,15 +28,12 @@ class DataManager:
         prefix: str = "",
         lines_per_file: int = 1_000_000
     ) -> list:
-        """
-        Download file from MinIO, split it, upload chunks, return list of chunk keys.
-        """
         local_input = f"temp_input_{uuid.uuid4().hex}.txt"
         uploaded = []
 
         try:
             print(f"[DataManager] Downloading {input_key} from bucket {bucket}")
-            download_file(bucket, input_key, local_input)
+            download_file(bucket=bucket, key=input_key, local_path=local_input, project_name=None)
 
             with open(local_input, 'r', encoding='utf-8') as f:
                 part_idx = 0
@@ -50,7 +49,7 @@ class DataManager:
                             pf.writelines(buffer)
 
                         key = f"{prefix}{part_name}"
-                        upload_file(local_part, bucket, key)
+                        upload_file(local_part, bucket, None, key)
                         uploaded.append(key)
 
                         os.remove(local_part)
@@ -63,7 +62,7 @@ class DataManager:
                     with open(local_part, 'w', encoding='utf-8') as pf:
                         pf.writelines(buffer)
                     key = f"{prefix}{part_name}"
-                    upload_file(local_part, bucket, key)
+                    upload_file(local_part, bucket, None, key)
                     uploaded.append(key)
                     os.remove(local_part)
 
@@ -74,12 +73,8 @@ class DataManager:
             if os.path.exists(local_input):
                 os.remove(local_input)
 
-
     @classmethod
-    def manage_reduce_data(cls, source: DataSource, sink: DataSink, dirpath:str) -> dict:
-        '''
-            Manages reduced data by combining all reduced parts into a single dictionary.
-        '''
+    def manage_reduce_data(cls, source: DataSource, sink: DataSink, dirpath: str) -> dict:
         combined_data = {}
         for file in os.listdir(dirpath):
             filepath = os.path.join(dirpath, file)
@@ -90,43 +85,105 @@ class DataManager:
         sink.save(combined_data, name='result')
         return combined_data
 
+    @classmethod
+    def merge_reduce_files(cls, main_task_id: str, bucket: str) -> str:
+        reduce_prefix = f"{main_task_id}/reduce_output/"
+        local_dir = f"temp_reduce_{uuid.uuid4().hex}"
+        os.makedirs(local_dir, exist_ok=True)
+
+        try:
+            objects = list_objects(bucket, reduce_prefix)
+            reduce_files = [k for k in objects if k.endswith('.jsonl')]
+
+            if not reduce_files:
+                raise ValueError("No reduce files found")
+
+            for obj_key in reduce_files:
+                local_path = os.path.join(local_dir, os.path.basename(obj_key))
+                download_file(bucket=bucket, key=obj_key, local_path=local_path, project_name=None)
+
+            source = jsonDataSource()
+            sink = jsonDataSink(local_dir, mode="jsonl")
+            cls.manage_reduce_data(source, sink, local_dir)  # ← теперь работает!
+
+            result_local = os.path.join(local_dir, "result.jsonl")
+            result_key = f"{main_task_id}/output/result.jsonl"
+            upload_file(result_local, bucket, None, result_key)
+
+            print(f"[DataManager] Merged reduce files → {result_key}")
+            return result_key
+
+        finally:
+            if os.path.exists(local_dir):
+                shutil.rmtree(local_dir)
+
 def callback(ch, method, properties, body):
     msg = json.loads(body)
 
-    if msg.get("action") != "split_txt":
-        print(f"[DataManager] Unknown action: {msg.get('action')}")
-        ch.basic_ack(method.delivery_tag)
-        return
+    action = msg.get("action")
 
-    input_key = msg["input_key"]
-    bucket = msg.get("bucket", BUCKET_NAME)
-    prefix = msg.get("prefix", "")
-    main_task_id = msg["main_task_id"]
-    correlation_id = properties.correlation_id
+    if action == "split_txt":
+        input_key = msg["input_key"]
+        bucket = msg.get("bucket", BUCKET_NAME)
+        prefix = msg.get("prefix", "")
+        main_task_id = msg["main_task_id"]
+        correlation_id = properties.correlation_id
 
-    print(f"[DataManager] Processing split request for {input_key} (task {main_task_id})")
+        print(f"[DataManager] Processing split request for {input_key} (task {main_task_id})")
 
-    chunk_keys = DataManager.split_and_upload_txt(
-        input_key=input_key,
-        bucket=bucket,
-        prefix=prefix,
-        lines_per_file=msg.get("lines_per_file", 1_000_000)
-    )
+        chunk_keys = DataManager.split_and_upload_txt(
+            input_key=input_key,
+            bucket=bucket,
+            prefix=prefix,
+            lines_per_file=msg.get("lines_per_file", 1_000_000)
+        )
 
-    response = {
-        "main_task_id": main_task_id,
-        "chunk_keys": chunk_keys,
-        "status": "success" if chunk_keys else "failed"
-    }
+        response = {
+            "main_task_id": main_task_id,
+            "chunk_keys": chunk_keys,
+            "status": "success" if chunk_keys else "failed"
+        }
 
-    ch.basic_publish(
-        exchange='',
-        routing_key=properties.reply_to,
-        properties=pika.BasicProperties(correlation_id=correlation_id),
-        body=json.dumps(response)
-    )
+        ch.basic_publish(
+            exchange='',
+            routing_key=properties.reply_to,
+            properties=pika.BasicProperties(correlation_id=correlation_id),
+            body=json.dumps(response)
+        )
 
-    print(f"[DataManager] Sent response with {len(chunk_keys)} chunks")
+    elif action == "merge_reduce":
+        main_task_id = msg["main_task_id"]
+        bucket = msg.get("bucket", BUCKET_NAME)
+        correlation_id = properties.correlation_id
+
+        print(f"[DataManager] Merging reduce files for task {main_task_id}")
+
+        try:
+            result_key = DataManager.merge_reduce_files(main_task_id, bucket)
+
+            response = {
+                "main_task_id": main_task_id,
+                "result_key": result_key,
+                "status": "success"
+            }
+        except Exception as e:
+            print(f"[DataManager] Merge failed: {e}")
+            response = {
+                "main_task_id": main_task_id,
+                "status": "failed",
+                "error": str(e)
+            }
+
+        ch.basic_publish(
+            exchange='',
+            routing_key=properties.reply_to,
+            properties=pika.BasicProperties(correlation_id=correlation_id),
+            body=json.dumps(response)
+        )
+
+    else:
+        print(f"[DataManager] Unknown action: {action}")
+
     ch.basic_ack(method.delivery_tag)
 
 
@@ -147,7 +204,7 @@ def start_data_manager():
 
     ch.basic_consume(queue=DATA_MANAGER_QUEUE, on_message_callback=callback, auto_ack=False)
 
-    print("[DataManager] Waiting for split requests...")
+    print("[DataManager] Waiting for requests (split_txt or merge_reduce)...")
     ch.start_consuming()
 
 
