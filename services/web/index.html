@@ -5,61 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>File Processing Web Interface</title>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #f9f9f9;
-        }
+        body { font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f9f9f9; }
         h1, h2 { color: #333; }
-        section {
-            margin-bottom: 30px;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        }
-        input[type="file"], input[type="text"] {
-            padding: 10px;
-            font-size: 16px;
-            width: 100%;
-            box-sizing: border-box;
-            margin-bottom: 10px;
-        }
-        button {
-            padding: 10px 15px;
-            font-size: 16px;
-            background-color: #007bff;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-        button:hover { background-color: #0056b3; }
-        .task-list {
-            margin-top: 20px;
-        }
-        .task-item {
-            padding: 15px;
-            margin-bottom: 10px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            background-color: #f8f9fa;
-        }
+        section { margin-bottom: 30px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        input[type="file"], input[type="text"] { padding: 10px; font-size: 16px; width: 100%; box-sizing: border-box; margin-bottom: 10px; }
+        button { padding: 10px 15px; font-size: 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .task-list { margin-top: 20px; }
+        .task-item { padding: 15px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 6px; background: #f8f9fa; }
         .task-item strong { display: block; margin-bottom: 5px; }
         .status-processing { color: #d9534f; font-weight: bold; }
         .status-completed { color: #5cb85c; font-weight: bold; }
         .status-error { color: #d9534f; font-weight: bold; }
-        .download-btn {
-            background-color: #5cb85c;
-            margin-top: 10px;
-            display: inline-block;
-            padding: 8px 16px;
-            text-decoration: none;
-            border-radius: 4px;
-        }
-        .download-btn:hover { background-color: #4cae4c; }
+        .download-btn { background: #5cb85c; margin-top: 10px; display: inline-block; padding: 8px 16px; color: white; text-decoration: none; border-radius: 4px; }
+        .download-btn:hover { background: #4cae4c; }
         #output { margin-top: 10px; padding: 10px; background: #eef; border-radius: 4px; }
     </style>
 </head>
@@ -75,25 +34,31 @@
 
     <section>
         <h2>Обработать файл, уже лежащий в хранилище</h2>
-        <input type="text" id="file-name-input" placeholder="Например: datasets/mydata.txt">
+        <input type="text" id="file-name-input" placeholder="Например: test_words.txt или folder/data.txt">
         <button id="upload-by-name-btn">Начать обработку по имени</button>
         <div id="upload-by-name-output"></div>
     </section>
 
     <section>
         <h2>Мои задачи</h2>
-        <p>Все ваши запущенные задачи сохраняются в браузере.</p>
+        <p>Задачи сохраняются в браузере. Устаревшие задачи (не найденные на сервере) автоматически удаляются.</p>
         <div id="task-list" class="task-list">
-            <p>Пока задач нет. Загрузите файл, и они появятся здесь.</p>
+            <p>Пока задач нет.</p>
         </div>
         <button id="refresh-all-btn">Обновить статус всех задач</button>
+        <button id="clear-all-btn">Очистить весь список</button>
     </section>
 
     <script>
-        const API_BASE_URL = 'http://localhost:8000'; // Измени, если сервер на другом порту
+        const API_BASE_URL = 'http://localhost:8000';
 
-        // Загружаем задачи из localStorage
         let tasks = JSON.parse(localStorage.getItem('processing_tasks') || '[]');
+
+        // Добавляем счётчик 404 для каждой задачи
+        tasks = tasks.map(task => ({
+            ...task,
+            notFoundCount: task.notFoundCount || 0
+        }));
 
         function saveTasks() {
             localStorage.setItem('processing_tasks', JSON.stringify(tasks));
@@ -118,22 +83,23 @@
                 `;
                 container.appendChild(div);
 
-                // Если статус не completed — добавляем кнопку проверки
+                const actionsDiv = document.getElementById(`actions-${task.task_id}`);
+
                 if (task.status !== 'completed' && task.status !== 'error') {
                     const checkBtn = document.createElement('button');
                     checkBtn.textContent = 'Проверить статус';
+                    checkBtn.style.marginRight = '10px';
                     checkBtn.onclick = () => checkStatus(task.task_id);
-                    document.getElementById(`actions-${task.task_id}`).appendChild(checkBtn);
+                    actionsDiv.appendChild(checkBtn);
                 }
 
-                // Если завершено — кнопка скачивания
                 if (task.status === 'completed') {
                     const downloadLink = document.createElement('a');
                     downloadLink.href = `${API_BASE_URL}/files/status?task_id=${task.task_id}&download=true`;
                     downloadLink.className = 'download-btn';
                     downloadLink.textContent = 'Скачать результат';
-                    downloadLink.download = ''; // Подсказка браузеру скачать файл
-                    document.getElementById(`actions-${task.task_id}`).appendChild(downloadLink);
+                    downloadLink.target = '_blank';
+                    actionsDiv.appendChild(downloadLink);
                 }
             });
         }
@@ -141,17 +107,18 @@
         function getStatusText(status) {
             switch(status) {
                 case 'processing': return 'Идёт обработка...';
-                case 'completed': return 'Обработка завершена';
+                case 'completed': return 'Обработка завершена!';
                 case 'error': return 'Ошибка обработки';
-                default: return 'Неизвестно';
+                default: return 'Неизвестный статус';
             }
         }
 
         async function addTask(task_id, filename) {
-            tasks.push({
-                task_id,
-                filename,
-                status: 'processing'
+            tasks.push({ 
+                task_id, 
+                filename, 
+                status: 'processing',
+                notFoundCount: 0 
             });
             saveTasks();
             renderTaskList();
@@ -163,24 +130,47 @@
 
             try {
                 const response = await fetch(`${API_BASE_URL}/files/status?task_id=${task_id}&download=false`);
-                const data = await response.json();
-
-                if (data.status === 'completed') {
-                    task.status = 'completed';
-                } else if (data.status === 'processing') {
-                    task.status = 'processing';
+                if (response.status === 404) {
+                    task.notFoundCount = (task.notFoundCount || 0) + 1;
+                    if (task.notFoundCount >= 3) {
+                        // Автоматическое удаление устаревшей задачи
+                        tasks = tasks.filter(t => t.task_id !== task_id);
+                        console.log(`Задача ${task_id} удалена из списка (не найдена на сервере)`);
+                    }
                 } else {
-                    task.status = 'error';
+                    task.notFoundCount = 0; // сбрасываем счётчик при успешном ответе
+                    const data = await response.json();
+                    if (data.status === 'completed' || data.status === 'error') {
+                        task.status = data.status;
+                    }
                 }
 
                 saveTasks();
                 renderTaskList();
             } catch (err) {
-                alert('Ошибка связи с сервером: ' + err.message);
+                console.error('Check status error:', err);
             }
         }
 
-        // Загрузка файла
+        // Авто-обновление каждые 10 сек
+        setInterval(() => {
+            tasks.forEach(task => {
+                if (task.status === 'processing') {
+                    checkStatus(task.task_id);
+                }
+            });
+        }, 10000);
+
+        // Кнопка очистки всего списка
+        document.getElementById('clear-all-btn').addEventListener('click', () => {
+            if (confirm('Очистить весь список задач?')) {
+                tasks = [];
+                saveTasks();
+                renderTaskList();
+            }
+        });
+
+        // Остальной код загрузки — без изменений
         document.getElementById('upload-btn').addEventListener('click', async () => {
             const fileInput = document.getElementById('file-input');
             const output = document.getElementById('upload-output');
@@ -189,7 +179,7 @@
                 return;
             }
 
-            output.textContent = 'Загрузка...';
+            output.textContent = 'Загрузка и запуск обработки...';
             const formData = new FormData();
             formData.append('file', fileInput.files[0]);
 
@@ -201,17 +191,16 @@
                 const text = await response.text();
                 output.textContent = text;
 
-                // Извлекаем task_id из ответа вида "File uploaded with task_id: abc123"
                 const match = text.match(/task_id: ([a-f0-9-]+)/);
                 if (match) {
                     await addTask(match[1], fileInput.files[0].name);
+                    fileInput.value = '';
                 }
             } catch (err) {
                 output.textContent = 'Ошибка: ' + err.message;
             }
         });
 
-        // Загрузка по имени
         document.getElementById('upload-by-name-btn').addEventListener('click', async () => {
             const nameInput = document.getElementById('file-name-input');
             const output = document.getElementById('upload-by-name-output');
@@ -233,22 +222,17 @@
                 if (match) {
                     const filename = name.split('/').pop();
                     await addTask(match[1], filename);
+                    nameInput.value = '';
                 }
             } catch (err) {
                 output.textContent = 'Ошибка: ' + err.message;
             }
         });
 
-        // Обновить все статусы
-        document.getElementById('refresh-all-btn').addEventListener('click', async () => {
-            for (const task of tasks) {
-                if (task.status !== 'completed' && task.status !== 'error') {
-                    await checkStatus(task.task_id);
-                }
-            }
+        document.getElementById('refresh-all-btn').addEventListener('click', () => {
+            tasks.forEach(task => checkStatus(task.task_id));
         });
 
-        // Первоначальный рендер списка
         renderTaskList();
     </script>
 </body>

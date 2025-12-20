@@ -1,10 +1,8 @@
+# services/planner/main.py
 import pika
 import json
 import uuid
 import time
-import os
-
-from libs.storage_client.client import upload_file, download_file
 
 RABBIT_PASS = 'password'
 RABBIT_LOGIN = 'admin'
@@ -16,42 +14,34 @@ WORKER_EVENTS_QUEUE = 'events.worker'
 PLANNER_EVENTS_QUEUE = 'events.planner'
 DATA_MANAGER_QUEUE = 'data_manager.requests'
 DATA_MANAGER_RESPONSE_QUEUE = 'data_manager.responses'
-COMPLETION_QUEUE = 'job_completion'  # новая очередь только для уведомлений
-API_QUEUE = 'user_requests'  # API Gateway слушает эту очередь
+API_QUEUE = 'user_requests'
+COMPLETION_QUEUE = 'job_completion'  # новая очередь для уведомлений о завершении
 
 NUM_REDUCE_PARTS = 4
 BUCKET_NAME = "mapreduce"
 
 main_tasks = {}
-correlation_ids = {}  # для split и merge
-
+correlation_ids = {}
 
 def get_task(ch, method, properties, body):
     data = json.loads(body)
-    print(f"[PLANNER] : got task {data}")
+    print(f"[PLANNER] Got task from API: {data}")
 
-    MAIN_TASK_ID = data['task_id']
-    INPUT_KEY = f"{MAIN_TASK_ID}/input_file/process.txt"
+    main_task_id = data['task_id']
+    input_key = f"{main_task_id}/input_file/process.txt"
 
-    request_split_from_data_manager(
-        ch,
-        input_key=INPUT_KEY,
-        main_task_id=MAIN_TASK_ID,
-        prefix=f"{MAIN_TASK_ID}/"
-    )
+    request_split_from_data_manager(ch, input_key, main_task_id, f"{main_task_id}/")
 
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
-
-def send_task(ch, task_type: str, address: str, main_task_id: str, task_id: str,
-              storage: str = "minio", bucket: str = "mapreduce"):
+def send_task(ch, task_type: str, address: str, main_task_id: str, task_id: str):
     task = {
         "main_task_id": main_task_id,
         "task_id": task_id,
         "type": task_type,
         "address": address,
-        "storage": storage,
-        "bucket": bucket,
+        "storage": "minio",
+        "bucket": BUCKET_NAME,
         "created_at": time.time()
     }
     ch.basic_publish(
@@ -60,8 +50,7 @@ def send_task(ch, task_type: str, address: str, main_task_id: str, task_id: str,
         body=json.dumps(task),
         properties=pika.BasicProperties(delivery_mode=2)
     )
-    print(f"[Planner] sent {task_type} task {task_id} address={address}")
-
+    print(f"[Planner] Sent {task_type} task {task_id}")
 
 def request_split_from_data_manager(ch, input_key: str, main_task_id: str, prefix: str):
     correlation_id = str(uuid.uuid4())
@@ -87,8 +76,6 @@ def request_split_from_data_manager(ch, input_key: str, main_task_id: str, prefi
             reply_to=DATA_MANAGER_RESPONSE_QUEUE
         )
     )
-    print(f"[Planner] requested split for {input_key}")
-
 
 def request_merge_from_data_manager(ch, main_task_id: str):
     correlation_id = str(uuid.uuid4())
@@ -111,15 +98,13 @@ def request_merge_from_data_manager(ch, main_task_id: str):
             reply_to=DATA_MANAGER_RESPONSE_QUEUE
         )
     )
-    print(f"[Planner] requested merge_reduce for {main_task_id}")
-
+    print(f"[Planner] Requested merge for {main_task_id}")
 
 def data_manager_response_callback(ch, method, properties, body):
     msg = json.loads(body)
     correlation_id = properties.correlation_id
 
     if correlation_id not in correlation_ids:
-        print(f"[Planner] Unknown correlation_id {correlation_id}")
         ch.basic_ack(method.delivery_tag)
         return
 
@@ -131,8 +116,6 @@ def data_manager_response_callback(ch, method, properties, body):
             print(f"[Planner] Split failed for {main_task_id}")
             ch.basic_ack(method.delivery_tag)
             return
-
-        print(f"[Planner] Received {len(chunk_keys)} chunks for {main_task_id}")
 
         main_tasks[main_task_id] = {
             "chunks": chunk_keys,
@@ -156,14 +139,11 @@ def data_manager_response_callback(ch, method, properties, body):
             main_tasks[main_task_id]['task_map'][task_id] = key
             send_task(ch, "map", key, main_task_id, task_id)
 
-        print("[Planner] map tasks sent")
-
     elif action_type == "merge":
         if msg.get("status") == "success":
             result_key = msg["result_key"]
             print(f"[Planner] Merge completed: {result_key}")
 
-            # Шлём в НОВУЮ очередь
             ch.basic_publish(
                 exchange='',
                 routing_key=COMPLETION_QUEUE,
@@ -174,78 +154,18 @@ def data_manager_response_callback(ch, method, properties, body):
                 }),
                 properties=pika.BasicProperties(delivery_mode=2)
             )
-            print(f"[Planner] Notified about completion via {COMPLETION_QUEUE}")
+        else:
+            print(f"[Planner] Merge failed: {msg.get('error')}")
 
     ch.basic_ack(method.delivery_tag)
-
 
 def planner_event_callback(ch, method, properties, body):
     msg = json.loads(body)
     event = msg.get("event")
 
-    if event == "worker.failed":
-        worker_id = msg.get("worker_id")
-        failed_task = msg.get("failed_task")
-        print(f"[Planner] got worker.failed for worker={worker_id} — requeueing pending map tasks")
-        total_requeued = 0
-        for main_task_id, info in main_tasks.items():
-            for chunk_key, status in list(info['chunk_status'].items()):
-                if status != 'done':
-                    new_task_id = str(uuid.uuid4())
-                    send_task(
-                        ch,
-                        task_type="map",
-                        address=chunk_key,
-                        main_task_id=main_task_id,
-                        task_id=new_task_id,
-                        storage="minio",
-                        bucket=BUCKET_NAME
-                    )
-                    info['task_map'][new_task_id] = chunk_key
-                    total_requeued += 1
-
-        if failed_task:
-            # Точная переотправка только упавшей задачи
-            new_task_id = str(uuid.uuid4())
-            send_task(
-                ch,
-                task_type=failed_task.get("type", "map"),
-                address=failed_task.get("address"),
-                main_task_id=failed_task.get("main_task_id"),
-                task_id=new_task_id
-            )
-            # Обновляем маппинг
-            main_task_id = failed_task.get("main_task_id")
-            if main_task_id in main_tasks:
-                main_tasks[main_task_id]['task_map'][new_task_id] = failed_task.get("address")
-                main_tasks[main_task_id]['chunk_status'][failed_task.get("address")] = 'pending'
-
-            print(f"[Planner] Precisely requeued failed task {new_task_id} -> {failed_task.get('address')}")
-
-        print(f"[Planner] requeued {total_requeued} tasks due to worker failure")
-        ch.basic_ack(method.delivery_tag)
-        return
-
-    if event in ("map.task.done", "map.done"):
-        main_task_id = msg.get("main_task_id")
-        task_id = msg.get("task_id")
-        if main_task_id in main_tasks:
-            mapping = main_tasks[main_task_id]['task_map']
-            chunk = mapping.get(task_id)
-            if chunk:
-                main_tasks[main_task_id]['chunk_status'][chunk] = 'done'
-                print(f"[Planner] map task {task_id} done -> chunk {chunk} marked done")
-            else:
-                for tid, ck in list(mapping.items()):
-                    if tid == task_id:
-                        main_tasks[main_task_id]['chunk_status'][ck] = 'done'
-                        break
-        ch.basic_ack(method.delivery_tag)
-        return
-
     if event == "map.phase.done":
         main_task_id = msg.get("main_task_id")
-        print(f"[Planner] map phase completed for {main_task_id}")
+        print(f"[Planner] Map phase done → starting reduce for {main_task_id}")
 
         ch.basic_publish(
             exchange='',
@@ -261,25 +181,21 @@ def planner_event_callback(ch, method, properties, body):
         for part in range(NUM_REDUCE_PARTS):
             send_task(ch, "reduce", str(part), main_task_id, str(uuid.uuid4()))
 
-    if event == "reduce.phase.done":
+    elif event == "reduce.phase.done":
         main_task_id = msg.get("main_task_id")
-        print(f"[Planner] Reduce phase completed for {main_task_id} — requesting merge")
-
+        print(f"[Planner] Reduce phase done → requesting merge for {main_task_id}")
         request_merge_from_data_manager(ch, main_task_id)
 
     ch.basic_ack(method.delivery_tag)
-
 
 def start_listeners(channel):
     channel.basic_consume(queue=PLANNER_EVENTS_QUEUE, on_message_callback=planner_event_callback, auto_ack=False)
     channel.basic_consume(queue=DATA_MANAGER_RESPONSE_QUEUE, on_message_callback=data_manager_response_callback, auto_ack=False)
     channel.basic_consume(queue=API_QUEUE, on_message_callback=get_task, auto_ack=False)
-    print("[Planner] Waiting for events...")
+    print("[Planner] Listening...")
     channel.start_consuming()
 
-
 def main():
-    print("[PLANNER] started")
     credentials = pika.PlainCredentials(RABBIT_LOGIN, RABBIT_PASS)
     params = pika.ConnectionParameters(host=RABBIT_HOST, port=RABBIT_PORT, virtual_host='/', credentials=credentials)
     conn = pika.BlockingConnection(params)
@@ -289,7 +205,6 @@ def main():
         ch.queue_declare(queue=q, durable=True)
 
     start_listeners(ch)
-
 
 if __name__ == "__main__":
     main()
